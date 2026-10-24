@@ -100,7 +100,20 @@ function loadBiliCookie() {
     return '';
   }
 }
-const BILI_COOKIE = IS_BILI ? loadBiliCookie() : '';
+/**
+ * Cookie 归一化。两种写法都要支持：
+ *   1. 完整 Cookie 串：SESSDATA=xxx; bili_jct=yyy
+ *   2. 只粘 SESSDATA 的值：937167a7%2C180832949%2Cxxxx
+ * 第 2 种必须补上 SESSDATA= 前缀。直接当 Cookie 头发出去是无效的，
+ * B 站会按未登录处理，画质死死锁在 720p。
+ * 实测同一份值：裸值 qn=250，加前缀 qn=10000（原画）。
+ */
+function normalizeBiliCookie(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  return s.includes('=') ? s : 'SESSDATA=' + s;
+}
+const BILI_COOKIE = IS_BILI ? normalizeBiliCookie(loadBiliCookie()) : '';
 const BILI_HDR = BILI_COOKIE
   ? Object.assign({ cookie: BILI_COOKIE }, BILI_HEADERS)
   : BILI_HEADERS;

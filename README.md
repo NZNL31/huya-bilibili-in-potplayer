@@ -186,8 +186,12 @@ https://www.huya.com/dank1ng      ← dank1ng 是房间名，也能用
 1. 用浏览器打开 [live.bilibili.com](https://live.bilibili.com) 并**登录**
 2. 按 `F12` → 顶部选 `Application`（应用）→ 左边 `Cookies` → `https://www.bilibili.com`
 3. 找到名为 **`SESSDATA`** 的那一行，双击复制它的值（一长串字符）
-4. 在本文件夹里新建文本文件 `bili-cookie.txt`，把值粘进去（只粘值，不要 `SESSDATA=` 前缀）
+4. 在本文件夹里新建文本文件 `bili-cookie.txt`，把值粘进去
+   （**只粘值**，不要 `SESSDATA=` 前缀；如果你习惯写完整形式 `SESSDATA=xxx` 也行，程序两种都认）
 5. 保存，重新双击 `play-huya&bili.bat` —— 画质选择里就会多出「原画」
+
+启动日志里会显示 `画质 qn=10000`，码率通常 6~10Mbps，分辨率 1920×1080 / 60 帧。
+如果仍显示 `qn=250`，说明 Cookie 没生效（过期或复制不全）。
 
 文件内容长这样，只有一行：
 
