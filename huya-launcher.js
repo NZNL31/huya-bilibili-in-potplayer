@@ -60,6 +60,12 @@ function normalizeRoom(v) {
 const LINE = '==========================================';
 const lastFile = path.join(__dirname, 'last-room.txt');
 
+// 内置默认房间：没输入、也没有历史记录时用它。
+// dank1ng 房间号是 10188，这里写房间名，跟虎牙地址栏一致。
+const DEFAULT_ROOM = 'dank1ng';
+// 24 小时基本都在播的官方赛事频道，拿不准看什么就输这个
+const ALWAYS_ON_ROOM = '660000';
+
 async function main() {
   console.log(LINE);
   console.log('        虎牙直播  -  PotPlayer');
@@ -75,9 +81,9 @@ async function main() {
 
   console.log('  请输入直播间，支持三种写法：');
   console.log('');
-  console.log('    房间号      825803');
+  console.log(`    房间号      ${ALWAYS_ON_ROOM}      （24 小时赛事频道）`);
   console.log('    房间名      dank1ng');
-  console.log('    完整链接    https://www.huya.com/825803');
+  console.log('    完整链接    https://www.huya.com/dank1ng');
   console.log('');
 
   let lastRoom = '';
@@ -85,11 +91,13 @@ async function main() {
 
   if (lastRoom) {
     console.log(`  上次使用: ${lastRoom}   （直接回车沿用）`);
-    console.log('');
+  } else {
+    console.log(`  直接回车 = ${DEFAULT_ROOM}`);
   }
+  console.log('');
 
   const input = await ask('  请输入房间: ');
-  const room = normalizeRoom(input) || lastRoom;
+  const room = normalizeRoom(input) || lastRoom || DEFAULT_ROOM;
 
   if (!room) {
     console.log('');

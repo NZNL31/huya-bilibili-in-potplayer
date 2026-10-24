@@ -265,8 +265,9 @@ async function getStreamUrl(force) {
   cachedUrl = {
     url: picked.url.replace(/^http:/, 'https:'),
     cdn: picked.cdnType,
-    title: d.liveData && d.liveData.title,
-    nickname: d.liveData && d.liveData.nickname,
+    // 接口改过字段：昵称在 profileInfo.nick，标题在 liveData.introduction
+    title: (d.liveData && (d.liveData.introduction || d.liveData.roomName)) || '',
+    nickname: (d.profileInfo && d.profileInfo.nick) || (d.liveData && d.liveData.nick) || '',
   };
   urlFetchedAt = Date.now();
   return cachedUrl;
