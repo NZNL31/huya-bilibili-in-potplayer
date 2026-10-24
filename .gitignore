@@ -2,6 +2,12 @@
 last-room.txt
 *.log
 
+# 便携版运行环境（首次运行自动下载，勿提交）
+runtime/
+runtime.zip
+ffmpeg.exe
+ffmpeg.tgz
+
 # 旧版本备份
 *.bak
 

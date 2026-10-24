@@ -27,7 +27,7 @@ const https = require('https');
 const zlib = require('zlib');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const os = require('os');
 
 const UA =
@@ -125,6 +125,34 @@ function detectFfmpeg() {
   const found = findFirst(cands);
   if (found) return found;
   return 'ffmpeg';   // 兜底：交给系统 PATH，找不到时 spawn 会报错并给出提示
+}
+
+/** ffmpeg 是不是真的能跑起来（兜底值是裸名字，得实际验证一次） */
+function hasFfmpeg() {
+  const ff = detectFfmpeg();
+  if (path.isAbsolute(ff)) return fs.existsSync(ff);
+  try {
+    return spawnSync(ff, ['-version'], { stdio: 'ignore', timeout: 6000 }).status === 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * NVENC 的 p1~p7 预设是 ffmpeg 4.4 才加的，更老的版本只认 hq/bd/slow 这套老名字。
+ * 直接问 ffmpeg 自己支不支持，比解析版本号可靠（git 构建的版本号解析不出来）。
+ */
+let _nvencP = null;
+function nvencHasP7() {
+  if (_nvencP !== null) return _nvencP;
+  try {
+    const r = spawnSync(detectFfmpeg(), ['-hide_banner', '-h', 'encoder=h264_nvenc'],
+      { encoding: 'utf8', timeout: 8000 });
+    _nvencP = /^\s+p[1-7]\s/m.test(r.stdout || '');
+  } catch (_) {
+    _nvencP = false;
+  }
+  return _nvencP;
 }
 
 const PLAYER = detectPlayer();
@@ -668,7 +696,7 @@ function startHlsPackager() {
   fs.mkdirSync(HLS_DIR, { recursive: true });
 
   const ff = detectFfmpeg();
-  if (!ff) { log('没找到 ffmpeg，HLS 模式不可用（FLV 模式仍可）'); return; }
+  if (!hasFfmpeg()) { log('没找到 ffmpeg，HLS 模式不可用（FLV 模式仍可）'); return; }
 
   // ★ v2.2 重编码 + CFR
   // 上游块拼接不可避免会留下少量缺口（实测 27.8fps，缺 8%），
@@ -684,6 +712,8 @@ function startHlsPackager() {
 
   let args;
   if (TRANSCODE) {
+    // p1 是最快档、画质最差，用 p5；老 ffmpeg（<4.4）不认 p 系列，退回 hq
+    const NVENC_PRESET = nvencHasP7() ? 'p5' : 'hq';
     args = [
       '-hide_banner', '-loglevel', 'error',
       // 本地回环也加重连：中继重启/预缓冲期间 ffmpeg 不会因短暂无数据而退出
@@ -693,7 +723,7 @@ function startHlsPackager() {
       '-c:v', 'h264_nvenc',
       // ★ 画质优先：p1 是最快档、画质最差，改成 p5；
       // 同时显式指定 High profile（NVENC 默认输出 Main，压缩效率低 10~15%）
-      '-preset', 'p5',
+      '-preset', NVENC_PRESET,
       '-tune', 'hq',
       '-profile:v', 'high',
       // VBR + 目标质量：静态画面自动省码率，动态画面才拉高，整体观感比 CBR 好
@@ -703,7 +733,8 @@ function startHlsPackager() {
       '-maxrate', `${Math.round(BITRATE * 1.25)}k`,
       '-bufsize', `${BITRATE * 2}k`,
       '-g', String(FPS * 2),
-      '-fps_mode', 'cfr',
+      // -vsync 是 -fps_mode 的旧写法，新旧 ffmpeg 都认，省得判断版本
+      '-vsync', 'cfr',
       '-r', String(FPS),
       '-c:a', 'aac', '-b:a', '128k',
       '-f', 'hls',
@@ -787,9 +818,9 @@ function serveHlsSegment(res, name) {
 const USE_FLV = !!flags.flv;   // --flv: 低延迟模式，直接播 FLV，不重编码
 
 server.listen(PORT, '127.0.0.1', async () => {
-  log(`中继已启动 (v2.3)`);
+  log(`中继已启动 (v2.6)`);
   log(`  播放器: ${PLAYER || '未找到（可用 --player 指定，或设置 POTPLAYER_PATH）'}`);
-  log(`  ffmpeg: ${detectFfmpeg()}`);
+  log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
   log(`  HLS 播放地址（推荐，零掉帧）: http://127.0.0.1:${PORT}/live.m3u8`);
   log(`  FLV 播放地址（低延迟备用）: http://127.0.0.1:${PORT}/live.flv`);
   startPuller();
@@ -833,7 +864,14 @@ function openPlayer() {
     : `http://127.0.0.1:${PORT}/live.m3u8`;
   log(`启动播放器: ${PLAYER}`);
   log(`播放地址: ${url}`);
-  spawn(PLAYER, [url], { detached: true, stdio: 'ignore' }).unref();
+  // 路径失效（换过目录、卸载过播放器）时 spawn 会抛 error，
+  // 不接住就是未捕获异常，整个中继会跟着挂掉
+  const child = spawn(PLAYER, [url], { detached: true, stdio: 'ignore' });
+  child.on('error', e => {
+    log(`拉起播放器失败: ${e.message}`);
+    log(`  可以手动用任意播放器打开: ${url}`);
+  });
+  child.unref();
 }
 
 function probeExisting(port) {

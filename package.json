@@ -1,7 +1,7 @@
 {
   "name": "huya-potplayer-relay",
-  "version": "2.3.0",
-  "description": "虎牙直播 → PotPlayer 本地中继：把碎块 CDN 流拼成连续 HLS，支持 1080p60 原画质、零掉帧、完整立体声",
+  "version": "2.6.0",
+  "description": "虎牙直播 → PotPlayer 本地中继：双击即用，自动准备便携版 Node.js 与 ffmpeg，把碎块 CDN 流拼成连续 HLS，1080p60 原画质、零掉帧、完整立体声",
   "main": "huya-relay.js",
   "repository": {
     "type": "git",
