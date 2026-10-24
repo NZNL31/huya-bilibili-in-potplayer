@@ -1,5 +1,6 @@
-# 虎牙直播 → PotPlayer 本地中继
+# 在 PotPlayer 里看虎牙直播
 
+> 把虎牙直播的碎块流拼成连续流，用 PotPlayer / VLC / mpv 播 1080p60 原画。
 > **双击即用。不用装 Node.js，不用装 ffmpeg，不用管理员权限。**
 
 ---
@@ -51,17 +52,17 @@
 ````text
 帮我在 Windows 上装好并运行一个开源小工具，遇到问题自己想办法解决，不要让我做技术判断。
 
-项目：https://github.com/NZNL31/huya-potplayer-relay
+项目：https://github.com/NZNL31/huya-in-potplayer
 作用：把虎牙直播的碎块 CDN 流拼成本地 HLS，用 PotPlayer 播放。
 
 请按顺序做：
 
 1. 用 PowerShell 执行下面三行（解压路径别带空格和中文）：
    $d="$env:USERPROFILE\huya"
-   Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-potplayer-relay/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"
+   Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-in-potplayer/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"
    Expand-Archive "$env:TEMP\h.zip" -DestinationPath $d -Force
 
-2. 运行 "$d\huya-potplayer-relay-main\play-huya.bat"
+2. 运行 "$d\huya-in-potplayer-main\play-huya.bat"
    首次运行会自动下载 Node.js 和 ffmpeg（共约 50MB），等进度条走完。
 
 3. 窗口提示「请输入房间」时直接回车（默认 dank1ng）；想先确认能播，输 660000（24 小时赛事频道）。
@@ -82,7 +83,7 @@
 开始菜单搜 **PowerShell** 打开，粘这一行回车，剩下的和双击一样：
 
 ```powershell
-$ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya"; Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-potplayer-relay/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"; Expand-Archive "$env:TEMP\h.zip" -DestinationPath $d -Force; & "$d\huya-potplayer-relay-main\play-huya.bat"
+$ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya"; Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-in-potplayer/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"; Expand-Archive "$env:TEMP\h.zip" -DestinationPath $d -Force; & "$d\huya-in-potplayer-main\play-huya.bat"
 ```
 
 > 这行命令做的事：下载 → 解压到 `%USERPROFILE%\huya` → 启动。只有 26KB，秒下。
