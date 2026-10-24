@@ -105,8 +105,8 @@ C:\Program Files\DAUM\PotPlayer\Engine\ffmpeg.exe
 ### 4. 获取本项目
 
 ```bat
-git clone https://github.com/<你的用户名>/huya-live-relay.git
-cd huya-live-relay
+git clone https://github.com/NZNL31/huya-potplayer-relay.git
+cd huya-potplayer-relay
 ```
 
 或者直接下载 ZIP 解压到任意目录。
