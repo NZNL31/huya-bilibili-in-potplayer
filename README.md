@@ -57,12 +57,12 @@
 
 请按顺序做：
 
-1. 用 PowerShell 执行下面三行（解压路径别带空格和中文）：
-   $d="$env:USERPROFILE\huya"
-   Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-in-potplayer/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"
-   Expand-Archive "$env:TEMP\h.zip" -DestinationPath $d -Force
+1. 用 PowerShell 下载并解压（解压路径别带空格和中文）。
+   仓库可能叫 huya-in-potplayer，也可能还是旧名 huya-potplayer-relay，
+   两个都试，哪个下载成功就用哪个。整段一次粘进去执行：
+   $d="$env:USERPROFILE\huya"; $z="$env:TEMP\h.zip"; $r='huya-in-potplayer'; try { Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing } catch { $r='huya-potplayer-relay'; Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing }; Expand-Archive $z -DestinationPath $d -Force
 
-2. 运行 "$d\huya-in-potplayer-main\play-huya.bat"
+2. 运行 "$d\$r-main\play-huya.bat"（$r 就是第 1 步下载成功的那个仓库名）
    首次运行会自动下载 Node.js 和 ffmpeg（共约 50MB），等进度条走完。
 
 3. 窗口提示「请输入房间」时直接回车（默认 dank1ng）；想先确认能播，输 660000（24 小时赛事频道）。
@@ -83,10 +83,11 @@
 开始菜单搜 **PowerShell** 打开，粘这一行回车，剩下的和双击一样：
 
 ```powershell
-$ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya"; Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-in-potplayer/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"; Expand-Archive "$env:TEMP\h.zip" -DestinationPath $d -Force; & "$d\huya-in-potplayer-main\play-huya.bat"
+$ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya"; $z="$env:TEMP\h.zip"; $r='huya-in-potplayer'; try { Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing } catch { $r='huya-potplayer-relay'; Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing }; Expand-Archive $z -DestinationPath $d -Force; & "$d\$r-main\play-huya.bat"
 ```
 
 > 这行命令做的事：下载 → 解压到 `%USERPROFILE%\huya` → 启动。只有 26KB，秒下。
+> 仓库改名过渡期，新旧两个名字都会试一遍，哪个能下用哪个。
 
 ---
 
