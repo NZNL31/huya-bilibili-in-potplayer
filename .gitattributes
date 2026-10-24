@@ -1,0 +1,8 @@
+# 统一换行符，避免 Windows 批处理在 clone 后损坏
+* text=auto
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf

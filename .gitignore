@@ -1,0 +1,16 @@
+# 运行时自动生成
+last-room.txt
+*.log
+
+# 旧版本备份
+*.bak
+
+# 依赖
+node_modules/
+
+# 系统/编辑器文件
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
