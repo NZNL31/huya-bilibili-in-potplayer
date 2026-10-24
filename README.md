@@ -93,10 +93,12 @@ $ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya"; $z="$env:TEM
 
 ## 首次运行在干什么？
 
-| 补什么 | 装到哪 | 大小 |
-|--------|--------|------|
-| Node.js 便携版 | 本文件夹的 `runtime\node.exe` | 约 30MB |
-| ffmpeg 便携版 | 本文件夹的 `ffmpeg.exe` | 约 22MB |
+| 补什么 | 装到哪 | 下载 | 占用磁盘 |
+|--------|--------|------|---------|
+| Node.js 便携版 | 本文件夹的 `runtime\node.exe` | 约 30MB | 约 70MB |
+| ffmpeg 便携版 | 本文件夹的 `ffmpeg.exe` | 约 22MB | 约 62MB |
+
+实测：千兆宽带下整套准备过程 **16 秒**，装完整个文件夹约 **130MB**。
 
 - **不写注册表**，不往系统里塞东西，卸载就是删文件夹
 - **不需要管理员权限**，不会弹 UAC
@@ -181,6 +183,26 @@ https://www.huya.com/dank1ng      ← dank1ng 是房间名，也能用
 2. Node.js 那个 zip 解压，把里面的 `node.exe` 放进本文件夹新建的 `runtime` 文件夹
 3. ffmpeg 那个 tgz 用 7-Zip 解开两层，把 `ffmpeg.exe` 放进本文件夹
 4. 重新双击 `play-huya.bat`
+
+### 窗口在跑，但 PotPlayer 没弹出来
+
+看黑窗口里有没有这行：
+
+```
+  播放器: 未找到（可用 --player 指定，或设置 POTPLAYER_PATH）
+```
+
+说明没找到 PotPlayer。程序会搜这几个位置：本文件夹、上一级、上两级、`C:\Program Files\DAUM\PotPlayer`、`C:\Program Files (x86)\DAUM\PotPlayer`、`%LOCALAPPDATA%\Programs\DAUM\PotPlayer`。
+
+**绿色版、或者装在别的盘**（比如 `D:\PotPlayer`）就搜不到，两种办法任选：
+
+1. **把本文件夹整个挪进 PotPlayer 目录**（像 `D:\PotPlayer\huya`），下次自动认出
+2. 或者启动时指定路径：
+   ```bat
+   runtime\node.exe huya-relay.js 825803 --open --player "D:\PotPlayer\PotPlayerMini64.exe"
+   ```
+
+都不想弄也行——黑窗口里会打印播放地址，手动在 PotPlayer 里按 `Ctrl+U`「打开 URL」粘进去，一样能播。
 
 ### 提示「端口 8765 被占用」
 
@@ -321,13 +343,26 @@ node huya-relay.js 825803 --port 8766 --open
 
 ### 实测数据
 
+**干净环境**（空文件夹、PATH 里没有 node 和 ffmpeg）从零跑通，两档画质都验过：
+
 房间 825803，蓝光8M 档：
 
 ```
-视频：1920x1080 / 59.94fps / H.264 High / 7484 kbps
-音频：aac (LC) / 44100 Hz / stereo / 128 kbps
+视频：1920x1080 / 59.94fps / H.264 High / 7484~9151 kbps
+音频：aac (LC) / 44100 Hz / stereo / 127 kbps
 分片：2 秒一片，每片 120 帧（= 60fps，零丢帧）
 ```
+
+房间 dank1ng（10188），蓝光8M 档 —— 主播自身推流码率就低：
+
+```
+视频：1920x1080 / 60fps / H.264 High / 2644 kbps
+音频：aac (LC) / 44100 Hz / stereo / 105 kbps
+分片：3 秒一片，每片 180 帧（= 59.2fps，零丢帧）
+```
+
+> 分片长度由关键帧间隔决定（`-c copy` 只能在关键帧切），所以不同房间会是 2~3 秒，属正常。
+> 连续跑 6 分 49 秒，分片器零重启。
 
 </details>
 

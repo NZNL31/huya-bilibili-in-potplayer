@@ -800,9 +800,12 @@ function startHlsPackager() {
     ];
   }
   log(`HLS 分片器启动: ${ff}${TRANSCODE ? `（NVENC 重编码 ${FPS}fps CFR）` : '（直接转封装）'}`);
-  // 用相对路径 + cwd，ffmpeg 才会走 file 协议、用原子 rename 落盘。
-  // 传绝对路径时它会报 "Cannot use rename on non file protocol"，
-  // 分片边写边被读，播放器偶尔会读到半截文件。
+  // 用相对路径 + cwd，分片全部落在 HLS_DIR 里。
+  // 注意：ffmpeg 4.1 的 hls 封装器在 Windows 上会间歇性吐
+  //   "Cannot use rename on non file protocol, this may lead to races..."
+  // 实测与相对/绝对路径、加不加 file: 前缀、hls_flags 组合都无关
+  // （同一条命令跑两次，一次有一次没有），分片仍完整落盘，属纯噪音。
+  // 所以不做参数规避，只在下面把它从日志里滤掉，免得用户以为出错了。
   hlsProc = spawn(ff, args, { cwd: HLS_DIR, stdio: ['ignore', 'ignore', 'pipe'] });
   // 捕获 ffmpeg 的 stderr：正常时不输出，出错时把原因打进日志便于排查
   let errLines = 0;
@@ -810,6 +813,7 @@ function startHlsPackager() {
     if (errLines >= 5) return;
     const msg = String(d).trim();
     if (!msg) return;
+    if (/Cannot use rename on non file protocol/i.test(msg)) return;   // 已知噪音
     errLines++;
     log(`[ffmpeg] ${msg.split('\n').slice(0, 2).join(' | ').slice(0, 240)}`);
   });
