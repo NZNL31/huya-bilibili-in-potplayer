@@ -8,6 +8,8 @@
 
 虎牙的直链丢给 PotPlayer 只能播几秒就断，这个程序在你自己电脑上把它拼成连续流，让 PotPlayer 能正常播 1080p60 原画。
 
+> 🤖 **不想自己动手？** [把下面那段话复制给任何 AI](#懒人模式让-ai-帮你装)，它会替你装好、配好、开播。
+
 ---
 
 ## ⚡ 使用（两步）
@@ -37,6 +39,51 @@
 输进去回车 → 问画质 → 问模式 → **一路回车**（默认就是最佳配置）→ PotPlayer 自动打开开始播。
 
 > 🔴 **播放期间别关那个黑窗口。** 关了就是停止播放。
+
+---
+
+## 懒人模式：让 AI 帮你装
+
+把下面**整段**复制，粘给任何能操作电脑的 AI（Codex / DeepSeek / Claude / Cursor / 豆包 / 通义都行），它照着做就行，你不用懂任何技术细节。
+
+````text
+帮我在 Windows 上装好并运行一个开源小工具，遇到问题自己想办法解决，不要让我做技术判断。
+
+项目：https://github.com/NZNL31/huya-potplayer-relay
+作用：把虎牙直播的碎块 CDN 流拼成本地 HLS，用 PotPlayer 播放。
+
+请按顺序做：
+
+1. 用 PowerShell 执行下面三行（解压路径别带空格和中文）：
+   $d="$env:USERPROFILE\huya"
+   Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-potplayer-relay/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"
+   Expand-Archive "$env:TEMP\h.zip" -DestinationPath $d -Force
+
+2. 运行 "$d\huya-potplayer-relay-main\play-huya.bat"
+   首次运行会自动下载 Node.js 和 ffmpeg（共约 50MB），等进度条走完。
+
+3. 窗口提示「请输入房间」时，输入房间号 825803 回车。
+
+4. 接着问画质、问模式，两次都直接回车（默认就是最佳配置）。
+
+5. PotPlayer 会自动打开播放。播放期间不要关闭那个命令行窗口。
+
+注意事项：
+- 没装 PotPlayer 的话先装：https://potplayer.daum.net/
+- 如果自动下载失败，手动把 node.exe 放进 runtime\ 目录，
+  把 ffmpeg.exe 放进项目根目录（和 play-huya.bat 同一层），再双击一次
+- 换台就重新双击 play-huya.bat，输入新房间号
+````
+
+### 或者自己粘一行命令
+
+开始菜单搜 **PowerShell** 打开，粘这一行回车，剩下的和双击一样：
+
+```powershell
+$ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya"; Invoke-WebRequest "https://codeload.github.com/NZNL31/huya-potplayer-relay/zip/refs/heads/main" -OutFile "$env:TEMP\h.zip"; Expand-Archive "$env:TEMP\h.zip" -DestinationPath $d -Force; & "$d\huya-potplayer-relay-main\play-huya.bat"
+```
+
+> 这行命令做的事：下载 → 解压到 `%USERPROFILE%\huya` → 启动。只有 26KB，秒下。
 
 ---
 
