@@ -26,8 +26,28 @@ $Sys32   = Join-Path $env:SystemRoot 'System32'
 $Curl    = Join-Path $Sys32 'curl.exe'
 $Tar     = Join-Path $Sys32 'tar.exe'
 
+# 跑一下可执行文件，判断它是不是真能用。
+# 坑：$ErrorActionPreference='Stop' 时，程序「启动不了」会抛终止性异常，
+# 而不是只把 $LASTEXITCODE 置成非 0 —— 不包 try/catch 的话整个脚本会中断，
+# 用户只看到一堆红色报错和 "Setup failed"。
+function Test-ExeRuns {
+    param([string]$Exe, [string[]]$Arguments)
+    try {
+        if ($Arguments) { & $Exe @Arguments *> $null } else { & $Exe *> $null }
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 function Test-NodeReady {
-    if (Test-Path $NodeExe) { return $true }
+    if (Test-Path $NodeExe) {
+        # 每次启动真的跑一下：文件被杀毒软件删一半、拷贝中断都能立刻发现，
+        # 否则要等到用户双击后窗口一闪才暴露。耗时约 50ms。
+        if (Test-ExeRuns -Exe $NodeExe -Arguments @('-v')) { return $true }
+        Remove-Item $NodeExe -Force -ErrorAction SilentlyContinue
+        return $false
+    }
     if (Get-Command node -ErrorAction SilentlyContinue) { return $true }
     return $false
 }
@@ -52,7 +72,7 @@ if (-not $needNode -and -not $needFf) { exit 0 }
 
 Write-Host ''
 Write-Host '=========================================='
-Write-Host '      首次运行：正在准备运行环境'
+Write-Host '        正在准备运行环境'
 Write-Host '=========================================='
 Write-Host ''
 if ($needNode) { Write-Host '  · Node.js   运行环境      约 30MB' }
@@ -69,15 +89,19 @@ function Get-RemoteFile {
     param([string]$Url, [string]$OutFile)
 
     if (Test-Path $Curl) {
-        & $Curl -L --fail --progress-bar --connect-timeout 20 --max-time 900 -o $OutFile $Url
-        if ($LASTEXITCODE -eq 0) { return $true }
+        try {
+            & $Curl -L --fail --progress-bar --connect-timeout 20 --max-time 900 -o $OutFile $Url
+            if ($LASTEXITCODE -eq 0) { return $true }
 
-        Write-Host ''
-        Write-Host '  换一种连接方式重试（忽略系统代理）...'
-        Write-Host ''
-        & $Curl -L --fail --progress-bar --noproxy '*' --connect-timeout 20 --max-time 900 -o $OutFile $Url
-        if ($LASTEXITCODE -eq 0) { return $true }
-        return $false
+            Write-Host ''
+            Write-Host '  换一种连接方式重试（忽略系统代理）...'
+            Write-Host ''
+            & $Curl -L --fail --progress-bar --noproxy '*' --connect-timeout 20 --max-time 900 -o $OutFile $Url
+            if ($LASTEXITCODE -eq 0) { return $true }
+            return $false
+        } catch {
+            return $false
+        }
     }
 
     # 系统没有 curl（很老的 Windows），退回 .NET
@@ -161,7 +185,19 @@ if ($needNode) {
         Write-Host ''
         exit 1
     }
-    Write-Host '  Node.js 就绪。'
+
+    # 真的跑一次，防止文件截断/被杀毒软件删掉一半
+    if (-not (Test-ExeRuns -Exe $NodeExe -Arguments @('-v'))) {
+        Write-Host ''
+        Write-Host '  [失败] node.exe 无法运行，可能被杀毒软件拦截或下载不完整。'
+        Write-Host '  请删掉 runtime 文件夹后重试，或把本文件夹加入杀毒软件白名单。'
+        Write-Host ''
+        exit 1
+    }
+
+    $ver = ''
+    try { $ver = (& $NodeExe -v 2>$null) } catch { $ver = '' }
+    Write-Host "  Node.js 就绪（$ver）。"
     Write-Host ''
 }
 
@@ -189,7 +225,11 @@ if ($needFf) {
 
     Write-Host ''
     Write-Host '  正在解压...'
-    & $Tar -xzf $tgz -C $Root --strip-components=1 'package/ffmpeg.exe'
+    try {
+        & $Tar -xzf $tgz -C $Root --strip-components=1 'package/ffmpeg.exe'
+    } catch {
+        # tar 解压失败也要走下面的提示，别抛异常中断
+    }
     Remove-Item $tgz -Force -ErrorAction SilentlyContinue
 
     if (-not (Test-Path $Ffmpeg)) {
@@ -198,6 +238,16 @@ if ($needFf) {
         Write-Host ''
         exit 1
     }
+
+    # 同样真的跑一次，别让一个坏文件拖到播放时才暴露
+    if (-not (Test-ExeRuns -Exe $Ffmpeg -Arguments @('-version'))) {
+        Write-Host ''
+        Write-Host '  [失败] ffmpeg.exe 无法运行，可能被杀毒软件拦截或下载不完整。'
+        Write-Host '  请删掉 ffmpeg.exe 后重试，或把本文件夹加入杀毒软件白名单。'
+        Write-Host ''
+        exit 1
+    }
+
     Write-Host '  ffmpeg 就绪。'
     Write-Host ''
 }

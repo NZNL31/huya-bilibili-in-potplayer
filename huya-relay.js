@@ -128,14 +128,20 @@ function detectFfmpeg() {
 }
 
 /** ffmpeg 是不是真的能跑起来（兜底值是裸名字，得实际验证一次） */
+let _hasFf = null;
 function hasFfmpeg() {
+  if (_hasFf !== null) return _hasFf;
   const ff = detectFfmpeg();
-  if (path.isAbsolute(ff)) return fs.existsSync(ff);
-  try {
-    return spawnSync(ff, ['-version'], { stdio: 'ignore', timeout: 6000 }).status === 0;
-  } catch (_) {
-    return false;
+  if (path.isAbsolute(ff)) {
+    _hasFf = fs.existsSync(ff);
+    return _hasFf;
   }
+  try {
+    _hasFf = spawnSync(ff, ['-version'], { stdio: 'ignore', timeout: 6000 }).status === 0;
+  } catch (_) {
+    _hasFf = false;
+  }
+  return _hasFf;
 }
 
 /**
@@ -153,6 +159,24 @@ function nvencHasP7() {
     _nvencP = false;
   }
   return _nvencP;
+}
+
+/**
+ * -fps_mode 是 ffmpeg 5.1 引入的，替代了老的 -vsync。
+ * 新版本会打废弃警告、将来可能彻底删掉，老版本又不认 -fps_mode，
+ * 所以同样问它自己支持哪个，而不是猜版本号。
+ */
+let _fpsMode = null;
+function ffmpegHasFpsMode() {
+  if (_fpsMode !== null) return _fpsMode;
+  try {
+    const r = spawnSync(detectFfmpeg(), ['-hide_banner', '-h', 'long'],
+      { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024 });
+    _fpsMode = /\bfps_mode\b/.test(r.stdout || '');
+  } catch (_) {
+    _fpsMode = false;
+  }
+  return _fpsMode;
 }
 
 const PLAYER = detectPlayer();
@@ -689,14 +713,23 @@ const HLS_DIR = path.join(os.tmpdir(), 'huya-hls-' + PORT);
 let hlsProc = null;
 let hlsRestartTimer = null;   // 自动重启定时器
 let hlsRestarts = 0;          // 连续重启次数，用于退避和熔断
+let hlsUnavailable = false;   // ffmpeg 缺失，别再反复尝试
 
 function startHlsPackager() {
-  if (hlsProc) return;
+  if (hlsProc || hlsUnavailable) return;
+
+  // 先确认 ffmpeg 在不在，再动目录：
+  // 播放器会反复请求 m3u8，缺 ffmpeg 时不能每次都清目录 + 打一行日志
+  if (!hasFfmpeg()) {
+    hlsUnavailable = true;
+    log('没找到 ffmpeg，HLS 模式不可用（FLV 模式仍可）');
+    return;
+  }
+
   try { fs.rmSync(HLS_DIR, { recursive: true, force: true }); } catch (_) {}
   fs.mkdirSync(HLS_DIR, { recursive: true });
 
   const ff = detectFfmpeg();
-  if (!hasFfmpeg()) { log('没找到 ffmpeg，HLS 模式不可用（FLV 模式仍可）'); return; }
 
   // ★ v2.2 重编码 + CFR
   // 上游块拼接不可避免会留下少量缺口（实测 27.8fps，缺 8%），
@@ -712,8 +745,10 @@ function startHlsPackager() {
 
   let args;
   if (TRANSCODE) {
-    // p1 是最快档、画质最差，用 p5；老 ffmpeg（<4.4）不认 p 系列，退回 hq
-    const NVENC_PRESET = nvencHasP7() ? 'p5' : 'hq';
+    // 新 ffmpeg 用 p5（单遍、画质好）；老版本没有 p 系列，
+    // 退回 medium —— 不要用 hq，它是「两遍编码」，老显卡上容易跟不上，
+    // 跟不上就会报 Too many packets buffered 然后整个分片器退出
+    const NVENC_PRESET = nvencHasP7() ? 'p5' : 'medium';
     args = [
       '-hide_banner', '-loglevel', 'error',
       // 本地回环也加重连：中继重启/预缓冲期间 ffmpeg 不会因短暂无数据而退出
@@ -733,16 +768,19 @@ function startHlsPackager() {
       '-maxrate', `${Math.round(BITRATE * 1.25)}k`,
       '-bufsize', `${BITRATE * 2}k`,
       '-g', String(FPS * 2),
-      // -vsync 是 -fps_mode 的旧写法，新旧 ffmpeg 都认，省得判断版本
-      '-vsync', 'cfr',
+      // 编码器偶尔跟不上时，音频包会在复用器里堆积；
+      // 默认队列只有 128 个包，一满 ffmpeg 就直接退出。放宽到 1024 更稳。
+      '-max_muxing_queue_size', '1024',
+      // 新旧 ffmpeg 只认其中一个，探测后选；两个选项效果完全一样
+      ...(ffmpegHasFpsMode() ? ['-fps_mode', 'cfr'] : ['-vsync', 'cfr']),
       '-r', String(FPS),
       '-c:a', 'aac', '-b:a', '128k',
       '-f', 'hls',
       '-hls_time', '1',
       '-hls_list_size', '8',
       '-hls_flags', 'delete_segments+omit_endlist',
-      '-hls_segment_filename', path.join(HLS_DIR, 'seg%05d.ts'),
-      path.join(HLS_DIR, 'live.m3u8'),
+      '-hls_segment_filename', 'seg%05d.ts',
+      'live.m3u8',
     ];
   } else {
     args = [
@@ -751,16 +789,20 @@ function startHlsPackager() {
       '-fflags', '+genpts+discardcorrupt+igndts',
       '-i', `http://127.0.0.1:${PORT}/live.flv`,
       '-c', 'copy',
+      '-max_muxing_queue_size', '1024',
       '-f', 'hls',
       '-hls_time', '1',
       '-hls_list_size', '8',
       '-hls_flags', 'delete_segments+omit_endlist',
-      '-hls_segment_filename', path.join(HLS_DIR, 'seg%05d.ts'),
-      path.join(HLS_DIR, 'live.m3u8'),
+      '-hls_segment_filename', 'seg%05d.ts',
+      'live.m3u8',
     ];
   }
   log(`HLS 分片器启动: ${ff}${TRANSCODE ? `（NVENC 重编码 ${FPS}fps CFR）` : '（直接转封装）'}`);
-  hlsProc = spawn(ff, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  // 用相对路径 + cwd，ffmpeg 才会走 file 协议、用原子 rename 落盘。
+  // 传绝对路径时它会报 "Cannot use rename on non file protocol"，
+  // 分片边写边被读，播放器偶尔会读到半截文件。
+  hlsProc = spawn(ff, args, { cwd: HLS_DIR, stdio: ['ignore', 'ignore', 'pipe'] });
   // 捕获 ffmpeg 的 stderr：正常时不输出，出错时把原因打进日志便于排查
   let errLines = 0;
   hlsProc.stderr.on('data', d => {
@@ -823,6 +865,17 @@ server.listen(PORT, '127.0.0.1', async () => {
   log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
   log(`  HLS 播放地址（推荐，零掉帧）: http://127.0.0.1:${PORT}/live.m3u8`);
   log(`  FLV 播放地址（低延迟备用）: http://127.0.0.1:${PORT}/live.flv`);
+
+  // 缺 ffmpeg 时播放器只会看到一个永远 503 的 m3u8，黑屏且没有解释。
+  // 启动阶段就说清楚，别让人干等。
+  if (!USE_FLV && !hasFfmpeg()) {
+    log('');
+    log('  ⚠ 没找到 ffmpeg，HLS 模式起不来，播放器会一直黑屏。');
+    log('    重新运行 play-huya.bat 会自动补上；');
+    log('    或者改用 FLV 模式：在 bat 里选 [3] 低延迟。');
+    log('');
+  }
+
   startPuller();
   try {
     const info = await getStreamUrl(true);
@@ -909,4 +962,14 @@ server.on('error', err => {
     });
 });
 
-process.on('SIGINT', () => { log('退出'); server.close(); process.exit(0); });
+// 退出时把 ffmpeg 子进程一起收掉。
+// 控制台被强关、进程被任务管理器结束时，ffmpeg 不一定跟着走，
+// 残留下来的会继续读本地流、往临时目录写分片。
+function killHls() {
+  if (!hlsProc) return;
+  try { hlsProc.kill(); } catch (_) {}
+  hlsProc = null;
+}
+process.on('exit', killHls);
+process.on('SIGTERM', () => { killHls(); process.exit(0); });
+process.on('SIGINT', () => { log('退出'); killHls(); server.close(); process.exit(0); });
