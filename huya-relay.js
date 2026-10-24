@@ -47,22 +47,71 @@ for (let i = 0; i < argv.length; i++) {
   } else pos.push(a);
 }
 /**
- * 把用户输入统一成房间标识。支持四种写法：
- *   825803                              纯房间号
- *   dank1ng                             英文房间名
- *   https://www.huya.com/825803         完整链接
- *   https://www.huya.com/dank1ng?x=1    带参数的链接
+ * 把用户输入拆成 { platform, room }。支持这些写法：
+ *   825803 / dank1ng                       虎牙（默认）
+ *   https://www.huya.com/825803            虎牙链接
+ *   https://live.bilibili.com/6            B 站链接
+ *   bili:6 / b站:6 / bl:6                  B 站显式写法
+ *   6 --bili                               房间号 + 开关
+ * 没写平台时默认虎牙，避免和虎牙的数字房间号混淆。
  */
-function normalizeRoomInput(v) {
-  let s = String(v || '').trim();
-  if (!s) return '';
-  const m = s.match(/huya\.com\/([^/?#\s]+)/i);   // 从链接里抠出房间段
-  if (m) s = m[1];
-  return s.split(/[?#]/)[0].trim();
+function parseTarget(v) {
+  const s = String(v || '').trim();
+  if (!s) return { platform: null, room: '' };
+
+  // B 站链接（含 h5 分享链接 live.bilibili.com/h5/6）
+  let m = s.match(/live\.bilibili\.com\/(?:h5\/)?(\d+)/i);
+  if (m) return { platform: 'bilibili', room: m[1] };
+
+  // B 站显式前缀
+  m = s.match(/^(?:bili|bilibili|b站|bl)\s*[:：]\s*(.+)$/i);
+  if (m) return { platform: 'bilibili', room: m[1].trim().split(/[?#]/)[0] };
+
+  // 虎牙链接
+  m = s.match(/huya\.com\/([^/?#\s]+)/i);
+  if (m) return { platform: 'huya', room: m[1].split(/[?#]/)[0].trim() };
+
+  // 裸房间号 / 房间名
+  return { platform: null, room: s.split(/[?#]/)[0].trim() };
 }
 
-const ROOM = normalizeRoomInput(flags.room || pos[0]) || 'dank1ng';
+const target = parseTarget(flags.room || pos[0]);
+const ROOM = target.room || 'dank1ng';
+const PLATFORM =
+  target.platform || (flags.bili || flags.bilibili ? 'bilibili' : 'huya');
+const IS_BILI = PLATFORM === 'bilibili';
 const PORT = parseInt(flags.port, 10) || 8765;
+
+// ---------------- B 站相关常量 ----------------
+// B 站的 CDN 校验 Referer，不带就是 403
+const BILI_HEADERS = {
+  referer: 'https://live.bilibili.com/',
+  origin: 'https://live.bilibili.com',
+};
+/**
+ * B 站画质：10000=原画 / 400=蓝光 / 250=超清 / 150=高清。
+ * 未登录时接口一律只给 250（实测 1280x720 30fps），要原画必须带登录 Cookie。
+ * Cookie 来源：环境变量 BILI_COOKIE，或本目录下的 bili-cookie.txt
+ * （浏览器 F12 → Application → Cookies → 复制 SESSDATA=xxx 那一整行即可）。
+ */
+const BILI_QN = parseInt(flags.qn, 10) || 10000;
+function loadBiliCookie() {
+  if (process.env.BILI_COOKIE) return process.env.BILI_COOKIE.trim();
+  try {
+    return fs.readFileSync(path.join(__dirname, 'bili-cookie.txt'), 'utf8').trim();
+  } catch (_) {
+    return '';
+  }
+}
+const BILI_COOKIE = IS_BILI ? loadBiliCookie() : '';
+const BILI_HDR = BILI_COOKIE
+  ? Object.assign({ cookie: BILI_COOKIE }, BILI_HEADERS)
+  : BILI_HEADERS;
+
+// 拉上游流时带的头：B 站 CDN 校验 Referer，虎牙无所谓
+const UPSTREAM_HEADERS = IS_BILI
+  ? Object.assign({ 'user-agent': UA, accept: '*/*' }, BILI_HDR)
+  : { 'user-agent': UA, accept: '*/*' };
 const OPEN = !!flags.open;
 
 // ---------------- 外部程序自动探测 ----------------
@@ -236,10 +285,7 @@ async function resolveRoomId() {
   return cachedRoomId;
 }
 
-async function getStreamUrl(force) {
-  // 签名有效期约 5 分钟，超过 3 分钟就换新的
-  if (!force && cachedUrl && Date.now() - urlFetchedAt < 180000) return cachedUrl;
-
+async function getHuyaStream() {
   const roomId = await resolveRoomId();
   const r = await httpsBuf(`https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid=${roomId}`);
   let j;
@@ -274,10 +320,96 @@ async function getStreamUrl(force) {
 }
 
 /**
+ * B 站取流。三步：
+ *   1. room/v1/Room/get_info      拿真实房间号（短号 6 → 7734200）、标题、开播状态
+ *   2. live_user/.../get_anchor_in_room  拿主播名（失败不影响播放）
+ *   3. xlive/.../getRoomPlayInfo  拿 FLV 直链
+ * 直链形如 https://<host><base_url><extra>，三段必须原样拼，缺一个就 403。
+ * 链接带 expires，所以和虎牙一样 3 分钟换一次。
+ */
+async function getBiliStream() {
+  const r1 = await httpsBuf(
+    `https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${encodeURIComponent(ROOM)}`,
+    BILI_HDR);
+  let j1;
+  try { j1 = JSON.parse(r1.body.toString('utf8')); }
+  catch (_) { throw new Error('B站接口返回非 JSON'); }
+  if (j1.code !== 0) {
+    throw new Error(`B站接口失败: ${j1.message || j1.code}（房间 ${ROOM} 可能不存在）`);
+  }
+
+  const info = j1.data || {};
+  const realId = info.room_id;
+  if (!realId) throw new Error('B站没返回 room_id');
+  // live_status: 0=未开播 1=直播中 2=轮播
+  if (info.live_status !== 1 && info.live_status !== 2) {
+    throw new Error('主播当前未开播 (live_status=' + info.live_status + ')');
+  }
+
+  let nickname = '';
+  try {
+    const r2 = await httpsBuf(
+      `https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room?roomid=${realId}`,
+      BILI_HDR);
+    const j2 = JSON.parse(r2.body.toString('utf8'));
+    nickname = ((j2.data || {}).info || {}).uname || '';
+  } catch (_) { /* 拿不到就算了，不影响播放 */ }
+
+  const api =
+    'https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo' +
+    `?room_id=${realId}&protocol=0&format=0&codec=0&qn=${BILI_QN}&platform=web`;
+  const r3 = await httpsBuf(api, BILI_HDR);
+  let j3;
+  try { j3 = JSON.parse(r3.body.toString('utf8')); }
+  catch (_) { throw new Error('B站取流接口返回非 JSON'); }
+  if (j3.code !== 0) throw new Error(`B站取流失败: ${j3.message || j3.code}`);
+
+  const pi = (j3.data || {}).playurl_info;
+  if (!pi || !pi.playurl) {
+    throw new Error('B站没给出播放地址（房间可能刚下播，或该画质需要登录 Cookie）');
+  }
+
+  // 只要 http_stream + flv + avc：hls/fmp4 我们不转，hevc 兼容性差
+  let codec = null;
+  for (const s of pi.playurl.stream || []) {
+    if (s.protocol_name !== 'http_stream') continue;
+    for (const f of s.format || []) {
+      if (f.format_name !== 'flv') continue;
+      const list = f.codec || [];
+      codec = list.find(c => c.codec_name === 'avc') || list[0] || null;
+      if (codec) break;
+    }
+    if (codec) break;
+  }
+  if (!codec || !codec.url_info || !codec.url_info.length) {
+    throw new Error('B站没给出 FLV 直链');
+  }
+
+  const u = codec.url_info[0];
+  cachedUrl = {
+    url: u.host + codec.base_url + u.extra,
+    cdn: 'BILI',
+    title: info.title || '',
+    nickname,
+    qn: codec.current_qn,
+    realId,
+  };
+  urlFetchedAt = Date.now();
+  return cachedUrl;
+}
+
+async function getStreamUrl(force) {
+  // 签名有效期约 5 分钟，超过 3 分钟就换新的
+  if (!force && cachedUrl && Date.now() - urlFetchedAt < 180000) return cachedUrl;
+  return IS_BILI ? getBiliStream() : getHuyaStream();
+}
+
+/**
  * CDN 测速：给每个节点发一个小请求，测首字节时间，选最快的。
  * 在服务启动后后台跑一次，结果重排 cdnOrder。
  */
 async function probeCdnSpeed() {
+  if (IS_BILI) return;   // B 站只给一个 host，没有多节点可选
   try {
     const roomId = await resolveRoomId();
     const r = await httpsBuf(`https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid=${roomId}`);
@@ -311,6 +443,7 @@ async function probeCdnSpeed() {
  * 不带 ratio 时只给 2~3 秒碎块，拼起来必然卡顿。
  */
 function withRatio(url, ratio) {
+  if (IS_BILI) return url;   // ratio 是虎牙的参数，B 站传了会被 CDN 拒
   let u = url;
   if (!/[?&]ratio=/.test(u)) u += (u.includes('?') ? '&' : '?') + 'ratio=' + ratio;
   return u;
@@ -337,7 +470,7 @@ function streamUpstream(url, onTag, onEnd) {
     onEnd(err);
   };
 
-  const req = https.get(url, { headers: { 'user-agent': UA, accept: '*/*' } }, res => {
+  const req = https.get(url, { headers: UPSTREAM_HEADERS }, res => {
     if (res.statusCode !== 200) {
       res.resume();
       return finish(new Error('HTTP ' + res.statusCode));
@@ -435,6 +568,17 @@ let lastProgressAt = Date.now(); // 上次时间戳推进的时刻，用于卡�
 let statBytes = 0;               // 统计窗口内输出字节
 let statStart = Date.now();
 
+// ★ 最近一个 GOP 的缓存。
+// FLV 客户端（以及由它喂的 ffmpeg 分片器）是「中途接入」的：
+// 它拿到的第一帧如果是从 GOP 中间切进去的 P 帧，参考帧在连接建立之前就已经发出去了，
+// 解码器只能丢掉这些帧等下一个关键帧 —— 表现为开头花屏 + 掉帧。
+// 实测 B 站 30fps 的流在 FLV 直连下只剩 27.1fps，并伴随 co located POCs unavailable。
+// 所以这里把「上一个关键帧以来的所有 tag」缓存下来，新客户端接入时先补发。
+let gopCache = [];
+let gopBytes = 0;
+let gopValid = false;            // 缓存是否从关键帧开始（不成立就不补发）
+const GOP_CACHE_MAX = 8 * 1024 * 1024;   // 超过 8MB 放弃缓存，退回原来的行为
+
 // 每 5 秒打印一次实际输出码率，可直接看出是否存在重复发送
 setInterval(() => {
   const dt = (Date.now() - statStart) / 1000;
@@ -469,6 +613,30 @@ setInterval(() => {
 
 function broadcast(item) {
   if (item.buf) statBytes += item.buf.length;
+
+  // 维护 GOP 缓存：遇到关键帧就重置，之后音视频 tag 依次累积。
+  // 只缓存已经发出去的 tag（时间戳已改写、且保证从关键帧开始），
+  // 这样新客户端补发完能无缝接上实时流。
+  if (item.kind === 'video' || item.kind === 'audio') {
+    const n = item.buf ? item.buf.length : 0;
+    if (item.kind === 'video' && item.key) {
+      gopCache = [];
+      gopBytes = 0;
+      gopValid = true;
+    }
+    if (gopValid) {
+      if (gopBytes + n > GOP_CACHE_MAX) {
+        // 关键帧间隔异常长（或码率极高），补发成本大于收益，干脆不补
+        gopCache = [];
+        gopBytes = 0;
+        gopValid = false;
+      } else {
+        gopCache.push(item);
+        gopBytes += n;
+      }
+    }
+  }
+
   for (const s of subscribers) {
     try { s.onTag(item); } catch (_) {}
   }
@@ -487,6 +655,7 @@ function maxPulls() {
   return BITRATE >= 8000 ? 2 : BITRATE >= 4000 ? 3 : 4;
 }
 let activePulls = 0;
+let lastFailLogAt = 0;
 
 function startPuller() {
   if (pullerStarted) return;
@@ -523,7 +692,13 @@ function pullOnce() {
       streamUpstream(u, onPullerTag, release);
     })
     .catch(e => {
-      log(`取流失败: ${e.message}`);
+      // 房间不存在 / 没开播时会一直重试（这是特性：等开播），
+      // 但多条连接同时失败能刷到每秒两行，所以同类错误 8 秒内只报一次。
+      const now = Date.now();
+      if (now - lastFailLogAt > 8000) {
+        lastFailLogAt = now;
+        log(`取流失败: ${e.message}`);
+      }
       release(e);
     });
 }
@@ -531,6 +706,7 @@ function pullOnce() {
 /** 自动降码率：连续失败 3 次就降一档，减少卡顿 */
 function maybeDowngrade() {
   if (!AUTO_BITRATE) return;
+  if (IS_BILI) return;   // B 站画质由 qn 决定，降 BITRATE 没意义
   if (consecutiveFails >= 3 && bitrateIdx < BITRATE_LADDER.length - 1) {
     bitrateIdx++;
     BITRATE = BITRATE_LADDER[bitrateIdx];
@@ -679,6 +855,13 @@ function handleClient(client) {
   emit(flvHeader);
   if (seqHeader) emit(seqHeader);
   if (audioSeqHeader) emit(audioSeqHeader);   // 音频配置头必须紧跟视频头
+
+  // 补发最近一个 GOP，让客户端从关键帧开始解码，而不是从 GOP 中间插进来。
+  // 缓存里都是已经改写过时间戳的成品 tag，直接按顺序发即可。
+  if (gopValid && gopCache.length) {
+    firstDataAt = Date.now();                 // 让下面的预缓冲定时器能正常工作
+    for (const it of gopCache) emit(it.buf);
+  }
 
   const prerollTimer = setInterval(() => {
     if (closed) { clearInterval(prerollTimer); return; }
@@ -894,7 +1077,7 @@ function serveHlsSegment(res, name) {
 const USE_FLV = !!flags.flv;   // --flv: 低延迟模式，直接播 FLV，不重编码
 
 server.listen(PORT, '127.0.0.1', async () => {
-  log(`中继已启动 (v2.7)`);
+  log(`中继已启动 (v2.8) — ${IS_BILI ? '哔哩哔哩' : '虎牙'}`);
   log(`  播放器: ${PLAYER || '未找到（可用 --player 指定，或设置 POTPLAYER_PATH）'}`);
   log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
   log(`  HLS 播放地址（推荐，零掉帧）: http://127.0.0.1:${PORT}/live.m3u8`);
@@ -910,10 +1093,16 @@ server.listen(PORT, '127.0.0.1', async () => {
     log('');
   }
 
+  if (IS_BILI && !BILI_COOKIE) {
+    log('  提示: 未配置 B 站 Cookie，画质最高只有超清(720p30)。');
+    log('        想要原画：把浏览器里的 SESSDATA=... 存成 bili-cookie.txt 放在本目录。');
+  }
+
   startPuller();
   try {
     const info = await getStreamUrl(true);
-    log(`房间 ${ROOM} -> 房间号 ${cachedRoomId}，节点 [${info.cdn}]，码率档 ${BITRATE / 1000}M`);
+    log(`房间 ${ROOM} -> 房间号 ${info.realId || cachedRoomId}，节点 [${info.cdn}]，` +
+      (IS_BILI ? `画质 qn=${info.qn}` : `码率档 ${BITRATE / 1000}M`));
     if (info.nickname) log(`主播: ${info.nickname}`);
     if (info.title) log(`标题: ${info.title}`);
   } catch (e) {

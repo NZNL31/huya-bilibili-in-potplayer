@@ -2,6 +2,9 @@
 last-room.txt
 *.log
 
+# B 站登录 Cookie（含 SESSDATA，等同账号凭证，绝对不能提交）
+bili-cookie.txt
+
 # 便携版运行环境（首次运行自动下载，勿提交）
 runtime/
 runtime.zip
