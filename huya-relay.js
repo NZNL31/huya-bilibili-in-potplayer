@@ -408,6 +408,21 @@ let pullerStarted = false;
 let pullerTimer = null;
 let lastTs = -1;
 let lastAudioTs = -1;
+// ★ 视频抖动缓冲
+// 并发拉流时，某条连接内部可能有空洞（CDN 块不连续），它会「跳着往前」。
+// 旧逻辑只要看到更新的时间戳就立刻转发，于是这条连接跳过的那几帧
+// 被另一条连接补过来时，时间戳已经落后于 lastTs，被当作重复帧丢掉。
+// 一旦丢掉的正好是关键帧，后面所有 P 帧都没有参考帧：
+//   实测 515 个视频帧只有 388 个解得出来，报 691 条 concealing / mmco 错误，
+//   播放器表现就是「掉帧、画面糊」。
+// 做法：收到的帧先按时间戳排队，等 VJITTER_MS 让别的连接把空洞补齐，
+// 再按顺序一次性发出去。代价是延迟增加约 0.35 秒，换来帧完整。
+// 默认 350ms；网络抖得厉害可以调大（--jitter 600），
+// 想压延迟就调小，但低于 150 时空洞补不齐，会重新出现丢帧。
+const VJITTER_MS = Math.max(0, parseInt(flags.jitter, 10) || 350);
+const VJITTER_MAX = 400;        // 最多排这么多帧，防止内存无限涨
+const pendingVideo = new Map(); // ts -> { ts, key, buf }
+let newestVideoTs = -1;
 let tsBase = -1;
 let sentSeq = false;
 let seqHeader = null;
@@ -430,6 +445,10 @@ setInterval(() => {
   statStart = Date.now();
 }, 5000).unref();
 
+// 抖动缓冲的定时放出。30ms 一次足够跟上 60fps（每帧 16.7ms），
+// 又不会空转太频繁。
+setInterval(() => flushVideo(false), 30).unref();
+
 // 看门狗 + 动态补拉
 // 不同房间/码率档的 CDN 分块长度差异很大（实测 8M 档一块只有 2.4 秒，
 // 4M 档有 8 秒）。固定并发数在碎块房间会供不上内容 → 播放断续。
@@ -443,6 +462,7 @@ setInterval(() => {
   if (gap > 8000) {
     log(`检测到 ${(gap / 1000).toFixed(0)} 秒无新内容，强制重新同步`);
     accepting = false;
+    pendingVideo.clear();      // 缓冲里都是过期帧，一起丢掉，等新的关键帧重建
     lastProgressAt = Date.now();
   }
 }, 1000).unref();
@@ -520,6 +540,40 @@ function maybeDowngrade() {
   }
 }
 
+/** 把一帧视频放进抖动缓冲。同一时间戳只留一份（各连接内容逐字节相同） */
+function queueVideo(t) {
+  if (t.ts <= lastTs) return;          // 已经发过了
+  if (pendingVideo.has(t.ts)) return;  // 别的连接先送到了
+  if (pendingVideo.size >= VJITTER_MAX) flushVideo(true);   // 顶不住就强制放
+  pendingVideo.set(t.ts, { ts: t.ts, key: t.isKey, buf: rewriteTs(t.buf, t.ts), at: Date.now() });
+  if (t.ts > newestVideoTs) newestVideoTs = t.ts;
+  lastProgressAt = Date.now();
+}
+
+/** 按时间戳从小到大把「已经够老」的帧发出去。force=true 时不管够不够老都放 */
+function flushVideo(force) {
+  while (pendingVideo.size) {
+    let minTs = Infinity;
+    for (const k of pendingVideo.keys()) if (k < minTs) minTs = k;
+    const item = pendingVideo.get(minTs);
+
+    // 两个条件满足其一才放行：
+    //   1. 后面已经有更新的帧，且间隔够了 —— 说明空洞基本补不上了
+    //   2. 这帧在缓冲里躺太久了 —— 上游断流时不能把它憋死
+    if (!force && newestVideoTs - minTs < VJITTER_MS && Date.now() - item.at < VJITTER_MS) return;
+
+    pendingVideo.delete(minTs);
+
+    // 第一帧必须是关键帧，否则解码器没有起点
+    if (!accepting) {
+      if (!item.key) continue;
+      accepting = true;
+    }
+    lastTs = minTs;
+    broadcast({ kind: 'video', key: item.key, ts: relTs(minTs), buf: item.buf });
+  }
+}
+
 function onPullerTag(item) {
   if (item.header) return;                 // FLV 头由各输出自己处理
 
@@ -548,19 +602,7 @@ function onPullerTag(item) {
     return;
   }
 
-  if (t.isKey) {
-    lastKeyframeAt = Date.now();
-    if (t.ts > lastTs) {
-      accepting = true;
-      lastTs = t.ts;
-      lastProgressAt = Date.now();
-      broadcast({ kind: 'video', key: true, ts: relTs(t.ts), buf: rewriteTs(t.buf, t.ts) });
-      return;
-    }
-    // v2 修复：不再返回 'stop' 主动截断。旧关键帧直接丢弃即可，
-    // 让这条连接自然结束，避免截断 GOP 导致播放器卡住。
-    return;
-  }
+  if (t.isKey) lastKeyframeAt = Date.now();
 
   // 音频：独立按自己的时间戳去重，不受视频关键帧门控
   if (t.type === 8) {
@@ -571,21 +613,8 @@ function onPullerTag(item) {
     return;
   }
 
-  if (!accepting) return;
-  // ★ v2.1 关键修复：必须丢弃时间戳不新的帧。
-  // 旧代码只更新 lastTs 却照发不误，导致 CDN 返回的重叠块被整段重复广播：
-  //   → 下游 DTS 非单调（时间戳倒退）
-  //   → H.264 参考链错乱（co located POCs unavailable / mmco: unref short failure）
-  //   → 播放器持续掉帧，且带宽被放大数倍（实测 4M 码率被放大到 39Mbps）
-  if (t.ts <= lastTs) return;
-  lastTs = t.ts;
-  lastProgressAt = Date.now();
-  broadcast({
-    kind: 'video',
-    key: false,
-    ts: relTs(t.ts),
-    buf: rewriteTs(t.buf, t.ts),
-  });
+  // 视频（关键帧 / 非关键帧统一处理）：先进抖动缓冲，由 flushVideo 按序发出
+  queueVideo(t);
 }
 
 function relTs(ts) {
@@ -865,7 +894,7 @@ function serveHlsSegment(res, name) {
 const USE_FLV = !!flags.flv;   // --flv: 低延迟模式，直接播 FLV，不重编码
 
 server.listen(PORT, '127.0.0.1', async () => {
-  log(`中继已启动 (v2.6)`);
+  log(`中继已启动 (v2.7)`);
   log(`  播放器: ${PLAYER || '未找到（可用 --player 指定，或设置 POTPLAYER_PATH）'}`);
   log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
   log(`  HLS 播放地址（推荐，零掉帧）: http://127.0.0.1:${PORT}/live.m3u8`);

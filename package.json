@@ -1,6 +1,6 @@
 {
   "name": "huya-in-potplayer",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "在 PotPlayer / VLC / mpv 里看虎牙直播：双击即用，自动准备便携版 Node.js 与 ffmpeg，把碎块 CDN 流拼成连续 HLS，1080p60 原画质、零掉帧、完整立体声",
   "main": "huya-relay.js",
   "repository": {
