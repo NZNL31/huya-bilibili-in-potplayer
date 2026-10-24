@@ -1,7 +1,9 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title Huya Live - PotPlayer
+rem The title contains an ampersand, which cmd treats as a command separator
+rem when unquoted -- escape it with ^ or the rest of the line becomes a command.
+title Huya ^& Bilibili Live - PotPlayer
 
 rem ------------------------------------------------------------
 rem  setup.ps1 checks the runtime and fills in whatever is missing
@@ -24,11 +26,11 @@ if not errorlevel 1 goto RUN_SYSTEM
 goto FAIL
 
 :RUN_LOCAL
-"%~dp0runtime\node.exe" "%~dp0huya-launcher.js"
+"%~dp0runtime\node.exe" "%~dp0launcher.js"
 goto DONE
 
 :RUN_SYSTEM
-node "%~dp0huya-launcher.js"
+node "%~dp0launcher.js"
 goto DONE
 
 :FAIL

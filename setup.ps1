@@ -6,7 +6,7 @@
 #    · ffmpeg    -> ffmpeg.exe（便携版，约 22MB）
 #
 #  不写注册表、不需要管理员权限、不用重启、不污染系统。
-#  由 play-huya.bat 自动调用，一般不需要手动运行。
+#  由 play-huya&bili.bat 自动调用，一般不需要手动运行。
 # ============================================================
 
 $ErrorActionPreference = 'Stop'
@@ -125,8 +125,8 @@ function Write-ManualHelp {
     Write-Host '    1. 用浏览器打开下面任一地址下载'
     foreach ($u in $Urls) { Write-Host "       $u" }
     Write-Host "    2. 解压，找到 $Target"
-    Write-Host '    3. 放到本文件夹（和 play-huya.bat 同一层）'
-    Write-Host '    4. 重新双击 play-huya.bat'
+    Write-Host '    3. 放到本文件夹（和 play-huya&bili.bat 同一层）'
+    Write-Host '    4. 重新双击 play-huya&bili.bat'
     Write-Host ''
 }
 
@@ -172,7 +172,7 @@ if ($needNode) {
         Write-Host ''
         Write-Host "  [失败] 解压出错：$($_.Exception.Message)"
         Write-Host ''
-        Write-Host '  请删掉 runtime 文件夹和 runtime.zip，重新双击 play-huya.bat。'
+        Write-Host '  请删掉 runtime 文件夹和 runtime.zip，重新双击 play-huya&bili.bat。'
         Write-Host ''
         exit 1
     }

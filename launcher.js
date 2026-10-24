@@ -49,7 +49,7 @@ const prompt = new Prompt();
 const ask = q => prompt.ask(q);
 
 /**
- * 把用户输入拆成 { platform, room }。规则与 huya-relay.js 里的 parseTarget 保持一致，
+ * 把用户输入拆成 { platform, room }。规则与 relay.js 里的 parseTarget 保持一致，
  * 两边必须同源，否则启动器存进 last-room.txt 的东西中继会认不出来。
  *   825803 / dank1ng                       虎牙（默认）
  *   https://www.huya.com/825803            虎牙链接
@@ -90,7 +90,7 @@ const BILI_QN_NAMES = {
   30000: '杜比', 20000: '4K', 10000: '原画', 400: '蓝光', 250: '超清', 150: '高清',
 };
 
-/** 和 huya-relay.js 的 loadBiliCookie 保持一致：环境变量优先，其次本地文件 */
+/** 和 relay.js 的 loadBiliCookie 保持一致：环境变量优先，其次本地文件 */
 function biliCookieConfigured() {
   if (process.env.BILI_COOKIE && process.env.BILI_COOKIE.trim()) return true;
   try {
@@ -235,7 +235,7 @@ async function main() {
   console.log('  关闭本窗口即可停止播放。');
   console.log('');
 
-  const relay = spawn(process.execPath, [path.join(__dirname, 'huya-relay.js'), ...args], {
+  const relay = spawn(process.execPath, [path.join(__dirname, 'relay.js'), ...args], {
     stdio: 'inherit',
     cwd: __dirname,
   });

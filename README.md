@@ -21,9 +21,12 @@
 
 点右上角绿色 **`Code`** → **`Download ZIP`** → 解压到任意文件夹。
 
-> 路径尽量短，比如 `D:\huya`。带空格或很深的路径偶尔会出问题。
+> 路径尽量短，比如 `D:\huya-bilibili`。带空格或很深的路径偶尔会出问题。
 
-### 第 2 步：双击 `play-huya.bat`
+### 第 2 步：双击 `play-huya&bili.bat`
+
+> ⚠️ 文件名里带 `&`，**双击没问题**，但在 cmd 里手打会被 `&` 截断。
+> 要用命令行启动，记得加引号：`"play-huya&bili.bat"`
 
 **第一次运行会自动准备环境**（下载约 50MB，一两分钟），屏幕上会显示进度条，等着就行。以后每次启动都是秒开。
 
@@ -56,17 +59,19 @@
 ````text
 帮我在 Windows 上装好并运行一个开源小工具，遇到问题自己想办法解决，不要让我做技术判断。
 
-项目：https://github.com/NZNL31/huya-in-potplayer
+项目：https://github.com/NZNL31/huya-bilibili-in-potplayer
 作用：把虎牙 / 哔哩哔哩直播的碎块 CDN 流拼成本地 HLS，用 PotPlayer 播放。
 
 请按顺序做：
 
 1. 用 PowerShell 下载并解压（解压路径别带空格和中文）。
-   仓库可能叫 huya-in-potplayer，也可能还是旧名 huya-potplayer-relay，
-   两个都试，哪个下载成功就用哪个。整段一次粘进去执行：
-   $d="$env:USERPROFILE\huya"; $z="$env:TEMP\h.zip"; $r='huya-in-potplayer'; try { Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing } catch { $r='huya-potplayer-relay'; Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing }; Expand-Archive $z -DestinationPath $d -Force
+   仓库改过名，当前叫 huya-bilibili-in-potplayer，旧名 huya-in-potplayer
+   也能下载（GitHub 会自动重定向），两个都试，哪个成功用哪个。
+   整段一次粘进去执行：
+   $d="$env:USERPROFILE\huya-bilibili"; $z="$env:TEMP\h.zip"; $r='huya-bilibili-in-potplayer'; try { Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing } catch { $r='huya-in-potplayer'; Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing }; Expand-Archive $z -DestinationPath $d -Force
 
-2. 运行 "$d\$r-main\play-huya.bat"（$r 就是第 1 步下载成功的那个仓库名）
+2. 运行 "$d\$r-main\play-huya&bili.bat"（$r 就是第 1 步下载成功的那个仓库名）
+   注意文件名里有 &，PowerShell 里必须用引号包住（上面已经包了），别去掉引号。
    首次运行会自动下载 Node.js 和 ffmpeg（共约 50MB），等进度条走完。
 
 3. 窗口提示「请输入房间」时直接回车（默认 dank1ng）；想先确认能播，输 660000（24 小时赛事频道）。
@@ -80,8 +85,8 @@
 注意事项：
 - 没装 PotPlayer 的话先装：https://potplayer.daum.net/
 - 如果自动下载失败，手动把 node.exe 放进 runtime\ 目录，
-  把 ffmpeg.exe 放进项目根目录（和 play-huya.bat 同一层），再双击一次
-- 换台就重新双击 play-huya.bat，输入新房间号
+  把 ffmpeg.exe 放进项目根目录（和 play-huya&bili.bat 同一层），再双击一次
+- 换台就重新双击 play-huya&bili.bat，输入新房间号
 - B 站不登录最高只有 720p30，这是 B 站接口限制，不是工具的问题。
   想要 1080p 原画需要自己配 bili-cookie.txt（README 里有步骤），不要替用户去搞 Cookie
 ````
@@ -91,11 +96,11 @@
 开始菜单搜 **PowerShell** 打开，粘这一行回车，剩下的和双击一样：
 
 ```powershell
-$ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya"; $z="$env:TEMP\h.zip"; $r='huya-in-potplayer'; try { Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing } catch { $r='huya-potplayer-relay'; Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing }; Expand-Archive $z -DestinationPath $d -Force; & "$d\$r-main\play-huya.bat"
+$ProgressPreference='SilentlyContinue'; $d="$env:USERPROFILE\huya-bilibili"; $z="$env:TEMP\h.zip"; $r='huya-bilibili-in-potplayer'; try { Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing } catch { $r='huya-in-potplayer'; Invoke-WebRequest "https://codeload.github.com/NZNL31/$r/zip/refs/heads/main" -OutFile $z -UseBasicParsing }; Expand-Archive $z -DestinationPath $d -Force; & "$d\$r-main\play-huya&bili.bat"
 ```
 
-> 这行命令做的事：下载 → 解压到 `%USERPROFILE%\huya` → 启动。只有 26KB，秒下。
-> 仓库改名过渡期，新旧两个名字都会试一遍，哪个能下用哪个。
+> 这行命令做的事：下载 → 解压到 `%USERPROFILE%\huya-bilibili` → 启动。只有 30KB 左右，秒下。
+> 仓库改过名，当前名和旧名都会试一遍，哪个能下用哪个。
 
 ---
 
@@ -182,7 +187,7 @@ https://www.huya.com/dank1ng      ← dank1ng 是房间名，也能用
 2. 按 `F12` → 顶部选 `Application`（应用）→ 左边 `Cookies` → `https://www.bilibili.com`
 3. 找到名为 **`SESSDATA`** 的那一行，双击复制它的值（一长串字符）
 4. 在本文件夹里新建文本文件 `bili-cookie.txt`，把值粘进去（只粘值，不要 `SESSDATA=` 前缀）
-5. 保存，重新双击 `play-huya.bat` —— 画质选择里就会多出「原画」
+5. 保存，重新双击 `play-huya&bili.bat` —— 画质选择里就会多出「原画」
 
 文件内容长这样，只有一行：
 
@@ -196,7 +201,7 @@ https://www.huya.com/dank1ng      ← dank1ng 是房间名，也能用
 也可以不用文件，改用环境变量：
 
 ```powershell
-$env:BILI_COOKIE='你的SESSDATA'; node huya-relay.js "https://live.bilibili.com/6"
+$env:BILI_COOKIE='你的SESSDATA'; node relay.js "https://live.bilibili.com/6"
 ```
 
 ---
@@ -244,7 +249,7 @@ $env:BILI_COOKIE='你的SESSDATA'; node huya-relay.js "https://live.bilibili.com
 说明环境准备那一步没跑起来。手动跑一次就能看到真正的原因：
 
 1. 在文件夹空白处**右键 → 在终端中打开**（没有这一项就在地址栏输 `cmd` 回车）
-2. 输入 `play-huya.bat` 回车
+2. 输入 `"play-huya&bili.bat"` 回车（**引号不能省**，`&` 在 cmd 里是命令分隔符）
 3. 看它报什么错
 
 最常见的是**杀毒软件拦了 `setup.ps1`**——把这个文件夹加进白名单再试。
@@ -258,7 +263,7 @@ $env:BILI_COOKIE='你的SESSDATA'; node huya-relay.js "https://live.bilibili.com
    - ffmpeg：`https://registry.npmmirror.com/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz`
 2. Node.js 那个 zip 解压，把里面的 `node.exe` 放进本文件夹新建的 `runtime` 文件夹
 3. ffmpeg 那个 tgz 用 7-Zip 解开两层，把 `ffmpeg.exe` 放进本文件夹
-4. 重新双击 `play-huya.bat`
+4. 重新双击 `play-huya&bili.bat`
 
 ### 窗口在跑，但 PotPlayer 没弹出来
 
@@ -275,7 +280,7 @@ $env:BILI_COOKIE='你的SESSDATA'; node huya-relay.js "https://live.bilibili.com
 1. **把本文件夹整个挪进 PotPlayer 目录**（像 `D:\PotPlayer\huya`），下次自动认出
 2. 或者启动时指定路径：
    ```bat
-   runtime\node.exe huya-relay.js 825803 --open --player "D:\PotPlayer\PotPlayerMini64.exe"
+   runtime\node.exe relay.js 825803 --open --player "D:\PotPlayer\PotPlayerMini64.exe"
    ```
 
 都不想弄也行——黑窗口里会打印播放地址，手动在 PotPlayer 里按 `Ctrl+U`「打开 URL」粘进去，一样能播。
@@ -302,7 +307,7 @@ taskkill /PID 12345 /F
    已捕获音频 AAC 配置头
    ```
    少了第二行说明音频配置头没抓到，关掉重开一次
-3. **ffmpeg 太旧**：删掉文件夹里的 `ffmpeg.exe`，重新双击 `play-huya.bat` 让它重下
+3. **ffmpeg 太旧**：删掉文件夹里的 `ffmpeg.exe`，重新双击 `play-huya&bili.bat` 让它重下
 
 ### 画面卡顿 / 掉帧
 
@@ -312,7 +317,7 @@ taskkill /PID 12345 /F
 4. **画面有花块 / 糊一下** → 是码流参考帧断了。默认 350ms 抖动缓冲已经能补住绝大部分，
    网络特别抖的话再调大：
    ```bat
-   runtime\node.exe huya-relay.js 825803 --open --jitter 600
+   runtime\node.exe relay.js 825803 --open --jitter 600
    ```
 
 ### 主播没开播
@@ -337,22 +342,22 @@ taskkill /PID 12345 /F
 
 ```bat
 :: 最简单
-node huya-relay.js 825803 --open
+node relay.js 825803 --open
 
 :: 指定画质 4M
-node huya-relay.js 825803 --bitrate 4000 --open
+node relay.js 825803 --bitrate 4000 --open
 
 :: 用完整链接
-node huya-relay.js https://www.huya.com/dank1ng --open
+node relay.js https://www.huya.com/dank1ng --open
 
 :: 流畅优先（NVENC 重编码）
-node huya-relay.js 825803 --transcode --open
+node relay.js 825803 --transcode --open
 
 :: 低延迟（FLV 直出）
-node huya-relay.js 825803 --flv --open
+node relay.js 825803 --flv --open
 
 :: 换端口
-node huya-relay.js 825803 --port 8766 --open
+node relay.js 825803 --port 8766 --open
 ```
 
 如果用的是便携版 Node，把 `node` 换成 `runtime\node.exe`。
@@ -382,8 +387,8 @@ node huya-relay.js 825803 --port 8766 --open
 B 站单独跑的例子：
 
 ```powershell
-node huya-relay.js "https://live.bilibili.com/6" --qn 10000 --open
-node huya-relay.js bili:21452505 --port 9000
+node relay.js "https://live.bilibili.com/6" --qn 10000 --open
+node relay.js bili:21452505 --port 9000
 ```
 
 ### 不用 PotPlayer？
@@ -399,10 +404,10 @@ node huya-relay.js bili:21452505 --port 9000
 
 | 文件 | 作用 | 哪来的 |
 |------|------|--------|
-| `play-huya.bat` | 双击入口 | 仓库自带 |
+| `play-huya&bili.bat` | 双击入口 | 仓库自带 |
 | `setup.ps1` | 首次运行检查并补齐环境 | 仓库自带 |
-| `huya-launcher.js` | 交互界面：问房间 / 画质 / 模式 | 仓库自带 |
-| `huya-relay.js` | 核心中继：拉流、拼接、HLS 输出（虎牙 + B 站） | 仓库自带 |
+| `launcher.js` | 交互界面：问房间 / 画质 / 模式 | 仓库自带 |
+| `relay.js` | 核心中继：拉流、拼接、HLS 输出（虎牙 + B 站） | 仓库自带 |
 | `runtime\node.exe` | Node.js 便携版 | 首次运行自动下载 |
 | `ffmpeg.exe` | ffmpeg 便携版 | 首次运行自动下载 |
 | `last-room.txt` | 记住上次的房间（含平台信息） | 运行时自动生成 |
@@ -457,7 +462,7 @@ node huya-relay.js bili:21452505 --port 9000
 虎牙 CDN（2~8 秒碎块）        B 站 CDN（连续 FLV）
         │  并发拉取，每条带随机参数            │  2 条并发，贴着直播边缘
         ▼                                      ▼
-  Node 中继（huya-relay.js）
+  Node 中继（relay.js）
         │  按时间戳去重 → 抖动缓冲重排 → 补发配置头 → 连续 FLV
         ▼
   http://127.0.0.1:8765/live.flv

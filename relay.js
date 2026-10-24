@@ -1,22 +1,19 @@
 #!/usr/bin/env node
 /**
- * 虎牙直播间 -> 本地连续 FLV/HLS 中继（给 PotPlayer / VLC / mpv 用）
- * v2.0 抗卡顿版
+ * 虎牙 / 哔哩哔哩直播间 -> 本地连续 FLV/HLS 中继（给 PotPlayer / VLC / mpv 用）
+ * v2.8
  *
- * 相比 v1 的改进：
- *   1. 默认码率 4000（蓝光4M），网络不足时自动降档到 2000/1000
- *   2. CDN 节点启动时自动测速，选最快的；播放中失败自动换节点
- *   3. 预缓冲加大到 3~5 秒，抵抗上游抖动
- *   4. 修复 GOP 截断：不再主动 stop，让上游给完整个 GOP
- *   5. 上游静默判定放宽到 6 秒，避免正常间隙被误判导致断流
- *   6. 时间戳连续化处理，防止播放器认为文件结束
+ * 处理链路：
+ *   上游 CDN -> 并发拉取 -> 按时间戳去重 -> 抖动缓冲重排
+ *            -> 补发 AVC/AAC 配置头 -> 连续 FLV -> ffmpeg 转封装 -> HLS
  *
  * 用法:
- *   node huya-relay.js                          # 默认房间 dank1ng，监听 127.0.0.1:8765
- *   node huya-relay.js 660115                   # 指定房间
- *   node huya-relay.js --room dank1ng --open    # 启动后自动拉起 PotPlayer
- *   node huya-relay.js --bitrate 2000 --open    # 指定码率档
- *   node huya-relay.js --auto-bitrate           # 开启自动降码率(默认开)
+ *   node relay.js                                   # 默认房间 dank1ng，监听 127.0.0.1:8765
+ *   node relay.js 660115                            # 虎牙房间号
+ *   node relay.js --room dank1ng --open             # 启动后自动拉起 PotPlayer
+ *   node relay.js --bitrate 2000 --open             # 虎牙：指定码率档
+ *   node relay.js https://live.bilibili.com/6       # B 站房间
+ *   node relay.js bili:6 --qn 10000 --open          # B 站：指定画质
  *
  * 播放器里打开:  http://127.0.0.1:8765/live.flv  或  http://127.0.0.1:8765/live.m3u8
  */
@@ -1088,7 +1085,7 @@ server.listen(PORT, '127.0.0.1', async () => {
   if (!USE_FLV && !hasFfmpeg()) {
     log('');
     log('  ⚠ 没找到 ffmpeg，HLS 模式起不来，播放器会一直黑屏。');
-    log('    重新运行 play-huya.bat 会自动补上；');
+    log('    重新运行 play-huya&bili.bat 会自动补上；');
     log('    或者改用 FLV 模式：在 bat 里选 [3] 低延迟。');
     log('');
   }
@@ -1130,7 +1127,7 @@ function openPlayer() {
     log('未找到 PotPlayer，无法自动拉起播放器。');
     log('  解决办法（任选其一）：');
     log('    1. 安装 PotPlayer：https://potplayer.daum.net/');
-    log('    2. 指定路径：node huya-relay.js <房间> --player "D:\\...\\PotPlayerMini64.exe"');
+    log('    2. 指定路径：node relay.js <房间> --player "D:\\...\\PotPlayerMini64.exe"');
     log('    3. 设置环境变量 POTPLAYER_PATH 指向 PotPlayerMini64.exe');
     log(`  或者手动用任意播放器打开：${url}`);
     return;
@@ -1180,7 +1177,7 @@ server.on('error', err => {
     })
     .catch(() => {
       console.error(`端口 ${PORT} 被其他程序占用，且不像是本中继。`);
-      console.error(`换个端口重试，例如:  node huya-relay.js --port 8766 --open`);
+      console.error(`换个端口重试，例如:  node relay.js --port 8766 --open`);
       process.exit(2);
     });
 });
