@@ -24,8 +24,11 @@ const https = require('https');
 const zlib = require('zlib');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const { spawn, spawnSync } = require('child_process');
 const os = require('os');
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -934,6 +937,35 @@ const server = http.createServer((req, res) => {
     );
     return;
   }
+  /**
+   * /status：自报家门，让新启动的中继知道「端口上跑的是哪个房间」。
+   * 只靠 /url 看不出房间号，换房间时就会误判成「同一条流」而复用旧中继，
+   * 结果输入新房间没反应、播放器还在放上一个主播。
+   */
+  if (u.pathname === '/status') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      app: 'play-huya&bili',
+      platform: PLATFORM,
+      room: ROOM,
+      roomId: cachedRoomId,
+      cdn: cachedUrl && cachedUrl.cdn,
+      nickname: (cachedUrl && cachedUrl.nickname) || '',
+      title: (cachedUrl && cachedUrl.title) || '',
+      port: PORT,
+      pid: process.pid,
+      uptime: Math.round(process.uptime()),
+    }));
+    return;
+  }
+  /** /shutdown：新启动的中继请求接管端口，本进程体面退出（会杀 ffmpeg、删缓存） */
+  if (u.pathname === '/shutdown') {
+    log('收到接管请求，本中继退出。');
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('bye');
+    setTimeout(() => shutdown(0), 100);   // 先把响应发出去再收摊
+    return;
+  }
   res.writeHead(404); res.end('try /live.flv or /live.m3u8');
 });
 
@@ -1225,7 +1257,19 @@ function serveHlsSegment(res, name) {
 // ---------------- 启动 ----------------
 const USE_FLV = !!flags.flv;   // --flv: 低延迟模式，直接播 FLV，不重编码
 
-server.listen(PORT, '127.0.0.1', async () => {
+/**
+ * 开始监听。端口被占用时会先走 server.on('error') 的接管流程，
+ * 接管成功后再调一次本函数，所以启动信息只会打一遍。
+ */
+function listen() {
+  server.listen(PORT, '127.0.0.1');
+}
+
+// 只挂一次：server.listen(port, host, cb) 的 cb 是 once('listening')，
+// 接管端口时 listen() 会被调用第二次，那样回调会挂两遍、启动信息打两次。
+server.once('listening', onListening);
+
+async function onListening() {
   log(`中继已启动 (v2.9) — ${IS_BILI ? '哔哩哔哩' : '虎牙'}`);
   log(`  播放器: ${PLAYER || '未找到（可用 --player 指定，或设置 POTPLAYER_PATH）'}`);
   log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
@@ -1272,7 +1316,7 @@ server.listen(PORT, '127.0.0.1', async () => {
       setTimeout(openPlayer, 5000);
     }
   }
-});
+}
 
 function openPlayer() {
   if (!PLAYER) {
@@ -1316,12 +1360,13 @@ function openPlayer() {
   child.unref();
 }
 
-function probeExisting(port) {
+function httpJson(port, pathname, timeoutMs = 4000) {
   return new Promise((resolve, reject) => {
-    const req = http.get(`http://127.0.0.1:${port}/url`, { timeout: 4000 }, res => {
+    const req = http.get({ host: '127.0.0.1', port, path: pathname, timeout: timeoutMs }, res => {
       let body = '';
       res.on('data', c => (body += c));
       res.on('end', () => {
+        if (res.statusCode !== 200) return reject(new Error('HTTP ' + res.statusCode));
         try { resolve(JSON.parse(body)); } catch (_) { reject(new Error('不是本中继')); }
       });
     });
@@ -1330,7 +1375,96 @@ function probeExisting(port) {
   });
 }
 
-// 端口被占用：多半是上次的中继没关干净。
+/** 只看状态码的 GET（/shutdown 回的是纯文本 "bye"，用 JSON 解析会误判成失败） */
+function httpPing(port, pathname, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: pathname, timeout: timeoutMs }, res => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('超时')); });
+  });
+}
+
+/**
+ * 探活：优先 /status（新版，能报出房间），老版本中继只有 /url。
+ * 两个都不通说明端口上是别的程序，那就不能动它。
+ */
+function probeExisting(port) {
+  return httpJson(port, '/status').catch(() => httpJson(port, '/url'));
+}
+
+/** 端口彻底空出来没有（旧中继退出、句柄释放之后才算） */
+function waitPortFree(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise(resolve => {
+    const tick = () => {
+      const sock = net.connect({ host: '127.0.0.1', port });
+      let done = false;
+      const finish = free => {
+        if (done) return;
+        done = true;
+        try { sock.destroy(); } catch (_) {}
+        if (free) return resolve(true);
+        if (Date.now() > deadline) return resolve(false);
+        setTimeout(tick, 300);
+      };
+      sock.setTimeout(800);
+      sock.on('connect', () => finish(false));
+      sock.on('error', () => finish(true));
+      sock.on('timeout', () => finish(false));
+    };
+    tick();
+  });
+}
+
+/**
+ * 老版本中继没有 /shutdown，只能按端口反查 PID 再结束它。
+ * 必须先确认那个进程是 node.exe —— 端口上要是别人的程序，绝对不能误杀。
+ */
+function killPortOwner(port) {
+  if (process.platform !== 'win32') return false;
+  try {
+    const out = spawnSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8', windowsHide: true }).stdout || '';
+    let pid = 0;
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i);
+      if (m && Number(m[1]) === port) { pid = Number(m[2]); break; }
+    }
+    if (!pid || pid === process.pid) return false;
+    const list = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true }).stdout || '';
+    if (!/^"node\.exe"/im.test(list.trim())) return false;
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 把旧中继请走，把端口抢回来；抢不到就带说明退出，别让人对着没反应的播放器发呆 */
+async function takeOverPort() {
+  // 1) 新版中继：礼貌地请它自己退出（它会顺手杀 ffmpeg、删缓存）
+  let asked = false;
+  try { asked = (await httpPing(PORT, '/shutdown', 3000)) === 200; } catch (_) {}
+  if (asked && await waitPortFree(PORT, 12000)) {
+    await sleep(600);   // 等它把缓存目录删完，别和新一轮的 ffmpeg 抢文件
+    log('旧中继已退出，重新接管端口。');
+    return true;
+  }
+  // 2) 老版本中继：没有 /shutdown，按端口找进程结束掉
+  log('旧中继没有响应接管请求，改为结束占用端口的 node 进程。');
+  if (killPortOwner(PORT) && await waitPortFree(PORT, 8000)) {
+    await sleep(600);
+    log('旧中继已结束，重新接管端口。');
+    return true;
+  }
+  return false;
+}
+
+// 端口被占用：多半是上次的中继没关干净。同房间就复用，不同房间就换掉它。
+let takeoverTried = false;
 server.on('error', err => {
   if (err.code !== 'EADDRINUSE') {
     console.error('中继启动失败:', err.message);
@@ -1338,11 +1472,40 @@ server.on('error', err => {
   }
   log(`端口 ${PORT} 已被占用，检测是否已有中继在运行...`);
   probeExisting(PORT)
-    .then(info => {
-      log(`发现正在运行的中继（节点 [${info.cdn || '?'}]），直接复用它。`);
-      log(`播放地址: http://127.0.0.1:${PORT}/${USE_FLV ? 'live.flv' : 'live.m3u8'}`);
-      if (OPEN) openPlayer();
-      setTimeout(() => process.exit(0), OPEN ? 2500 : 0);
+    .then(async info => {
+      // 老版本中继没有 /status，info.room 是空的：这时不能假设「同一条流」
+      const running = String(info.room || '');
+      const same = running
+        ? running.toLowerCase() === String(ROOM).toLowerCase() && (info.platform || 'huya') === PLATFORM
+        : false;
+
+      if (same) {
+        log(`发现正在运行的中继（节点 [${info.cdn || '?'}]），房间相同，直接复用它。`);
+        log(`播放地址: http://127.0.0.1:${PORT}/${USE_FLV ? 'live.flv' : 'live.m3u8'}`);
+        if (OPEN) openPlayer();
+        setTimeout(() => process.exit(0), OPEN ? 2500 : 0);
+        return;
+      }
+
+      log(running
+        ? `旧中继在播 ${running}${info.nickname ? '（' + info.nickname + '）' : ''}，和这次的 ${ROOM} 不是同一个房间，切换。`
+        : '旧中继版本较老，报不出房间号，按「换房间」处理。');
+
+      if (takeoverTried) {
+        console.error(`端口 ${PORT} 仍然被占用，无法切换到 ${ROOM}。`);
+        console.error('  请先关掉正在播放的 PotPlayer（中继会跟着退出），或换个端口重试。');
+        process.exit(3);
+      }
+      takeoverTried = true;
+
+      const ok = await takeOverPort();
+      if (!ok) {
+        console.error(`端口 ${PORT} 被占用，而且没法自动接管（可能是别的程序，或权限不够）。`);
+        console.error('  先关掉正在播放的 PotPlayer，或者换个端口：');
+        console.error(`  node relay.js ${ROOM} --port ${PORT + 1} --open`);
+        process.exit(3);
+      }
+      listen();
     })
     .catch(() => {
       console.error(`端口 ${PORT} 被其他程序占用，且不像是本中继。`);
@@ -1398,3 +1561,6 @@ process.on('unhandledRejection', e => shutdown(1, `异常退出: ${e && e.messag
 
 // 启动时先清一遍上次没删干净的残留（进程已死的目录直接清，剩下的按时间兜底）
 sweepStaleCache();
+
+// 监听放在最后：上面 server.on('error') 的接管逻辑必须先注册好
+listen();

@@ -13,6 +13,7 @@
 
 const readline = require('readline');
 const net = require('net');
+const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -289,10 +290,11 @@ async function main() {
   });
   relay.unref();
 
-  const up = await waitRelay(PORT, 15000);
+  // 换房间时中继要先接管旧进程（最多十几秒），所以别只等 15 秒就判死
+  const up = await waitRelay(PORT, 25000);
   if (!up) {
     console.log('');
-    console.log('  [错误] 中继 15 秒内没起来，先别关窗口，看看原因：');
+    console.log('  [错误] 中继 25 秒内没起来，先别关窗口，看看原因：');
     console.log('');
     dumpLogTail(12);
     console.log('');
@@ -301,13 +303,64 @@ async function main() {
     return;
   }
 
+  // 端口通了不代表播的就是你要的房间：旧中继还在跑时，新版会去接管它，
+  // 接管失败的话端口照样是通的。这里核对一下，别让人以为切换成功了。
+  const live = await waitForRoom(PORT, parseTarget(roomArg).room, 12000);
+  if (live && live.room && String(live.room).toLowerCase() !== parseTarget(roomArg).room.toLowerCase()) {
+    console.log('');
+    console.log(`  [警告] 8765 上跑的仍然是 ${live.room}${live.nickname ? '（' + live.nickname + '）' : ''}，不是 ${roomArg}。`);
+    console.log('        先关掉正在播放的 PotPlayer（中继会跟着退出），再重新运行本程序。');
+    console.log('');
+    dumpLogTail(6);
+    process.exitCode = 1;
+    return;
+  }
+
   console.log(`  ✓ 中继已在后台运行（127.0.0.1:${PORT}）`);
+  if (live && live.room) {
+    console.log(`  正在播放: ${live.room}${live.nickname ? '（' + live.nickname + '）' : ''}`);
+  } else {
+    console.log('  [提示] 读不到中继的 /status，没法确认在播哪个房间；有问题看 relay.log。');
+  }
   console.log(`  日志: ${LOG_NAME}（出问题看它）    缓存: .cache\\hls-${PORT}（退出自动删）`);
   console.log('');
   console.log('  停止播放：直接关掉 PotPlayer 即可，中继和缓存会自动收尾。');
   console.log('  窗口 3 秒后关闭...');
   await sleep(3000);
   process.exitCode = 0;
+}
+
+/** 读中继的 /status（新版中继才有这个接口），拿不到返回 null */
+function relayStatus(port) {
+  return new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/status', timeout: 2000 }, res => {
+      let body = '';
+      res.on('data', c => (body += c));
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); } catch (_) { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
+/**
+ * 等到中继确实在播我们要的房间。
+ * 接管旧中继那几秒里 /status 可能还回着旧的房间，所以轮询，不能看一眼就下结论。
+ */
+async function waitForRoom(port, want, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const s = await relayStatus(port);
+    if (s && s.room) {
+      last = s;
+      if (String(s.room).toLowerCase() === String(want).toLowerCase()) return s;
+    }
+    await sleep(500);
+  }
+  return last;
 }
 
 /**
