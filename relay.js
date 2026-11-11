@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 虎牙 / 哔哩哔哩直播间 -> 本地连续 FLV/HLS 中继（给 PotPlayer / VLC / mpv 用）
- * v2.8
+ * v2.9
  *
  * 处理链路：
  *   上游 CDN -> 并发拉取 -> 按时间戳去重 -> 抖动缓冲重排
@@ -253,8 +253,19 @@ const PREROLL_BYTES = 2 * 1024 * 1024;
 const IDLE_ROTATE_MS = 6000;        // 上游静默 6 秒才轮换（原2500太激进，正常间隙被误杀）
 const POLL_GAP = 100;               // 上一条结束后稍等再开下一条，给系统喘息
 
-const log = (...a) =>
-  console.log(new Date().toLocaleTimeString('zh-CN', { hour12: false }), ...a);
+/**
+ * 日志同时写控制台和文件。
+ * 启动器现在会把中继放到后台跑（没有黑窗口可看），出问题只能靠 relay.log 复盘；
+ * --log-file <路径> 指定位置，每次启动清空，只保留本次运行。
+ */
+const LOG_FILE = flags['log-file'] ? path.resolve(String(flags['log-file'])) : null;
+if (LOG_FILE) { try { fs.writeFileSync(LOG_FILE, ''); } catch (_) {} }
+const log = (...a) => {
+  const parts = a.map(x => (typeof x === 'string' ? x : String(x)));
+  const line = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' ' + parts.join(' ');
+  console.log(line);
+  if (LOG_FILE) { try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch (_) {} }
+};
 
 // ---------------- HTTP 工具 ----------------
 function httpsBuf(url, headers, timeoutMs = 20000) {
@@ -930,13 +941,115 @@ const server = http.createServer((req, res) => {
 /**
  * PotPlayer 播放「无限长的 FLV」时会卡住（它按有限文件处理）。
  * 所以额外提供 HLS：自己把 FLV 重新封装成 TS 分片，播 m3u8 就正常了。
- * 分片直接由 ffmpeg 从本地 /live.flv 转出，写到临时目录。
+ * 分片直接由 ffmpeg 从本地 /live.flv 转出，写到下面这个缓存目录。
+ *
+ * 分片目录（也就是「缓存」）：
+ * 旧版本用 os.tmpdir()，也就是 %TEMP%，而且退出时只杀 ffmpeg、目录从来不删：
+ * 跑完一场直播，C 盘就多出一堆 .ts，窗口被强关时还会留下孤儿 ffmpeg 继续写。
+ * 现在默认放到本目录下的 .cache\hls-<端口>：
+ *   · 和程序在同一个盘，整个程序目录搬走也不会把缓存留在原来那台盘上
+ *   · 占了多少一眼可见，删掉这个文件夹就等于清空缓存
+ *   · 正常退出 / Ctrl+C / 关窗口 / 异常崩溃都会自动删掉
+ * --cache-dir <目录> 换位置，--keep-cache 保留分片（排查问题用）。
  */
-const HLS_DIR = path.join(os.tmpdir(), 'huya-hls-' + PORT);
+const CACHE_ROOT = flags['cache-dir']
+  ? path.resolve(String(flags['cache-dir']))
+  : path.join(__dirname, '.cache');
+const KEEP_CACHE = !!flags['keep-cache'];
+const HLS_DIR = path.join(CACHE_ROOT, 'hls-' + PORT);
 let hlsProc = null;
 let hlsRestartTimer = null;   // 自动重启定时器
 let hlsRestarts = 0;          // 连续重启次数，用于退避和熔断
 let hlsUnavailable = false;   // ffmpeg 缺失，别再反复尝试
+let pruneTimer = null;        // 分片巡检定时器
+/**
+ * 这份缓存目录是不是本次运行的进程建的。
+ * 端口被占用时会复用已在跑的中继（复用者自己退出时不能去删别人的目录），
+ * 所以只有真正建过目录的进程才有资格清。
+ */
+let hlsDirOwned = false;
+
+/** 删目录。删不掉（文件还被播放器占着）返回 false，留给下次启动或 clean-cache.js */
+function rmDirQuiet(dir) {
+  try { fs.rmSync(dir, { recursive: true, force: true }); return true; }
+  catch (_) { return false; }
+}
+
+/** 清掉本次的分片目录；.cache 空了连它一起删，不留空壳 */
+function clearCacheDir() {
+  if (KEEP_CACHE || !hlsDirOwned) return;
+  hlsDirOwned = false;
+  rmDirQuiet(HLS_DIR);
+  try {
+    if (fs.existsSync(CACHE_ROOT) && fs.readdirSync(CACHE_ROOT).length === 0) fs.rmdirSync(CACHE_ROOT);
+  } catch (_) {}
+}
+
+/**
+ * 清掉以前留下的分片目录：强行关机、任务管理器结束进程、拔电源都会留下。
+ * 判据有两级：
+ *   1. 目录里 owner.json 记的进程号已经不存在 → 立刻清（上次被强杀的）
+ *   2. 没有 owner.json（老版本留下的）→ 只看时间，一小时没更新过才清
+ * 正在播的目录秒秒在写、进程也活着，两条都不会命中。
+ */
+function sweepStaleCache() {
+  const now = Date.now();
+  const roots = [CACHE_ROOT, os.tmpdir()];
+  for (const root of roots) {
+    let names = [];
+    try { names = fs.readdirSync(root); } catch (_) { continue; }
+    for (const name of names) {
+      if (!/^(?:hls|huya-hls)-\d+$/.test(name)) continue;
+      const dir = path.join(root, name);
+      try {
+        const st = fs.statSync(dir);
+        if (!st.isDirectory()) continue;
+        let dead = false;
+        try {
+          const owner = JSON.parse(fs.readFileSync(path.join(dir, 'owner.json'), 'utf8'));
+          if (owner && owner.pid) dead = !isAlive(owner.pid);
+        } catch (_) {}
+        if (!dead && now - st.mtimeMs < 3600000) continue;
+        if (rmDirQuiet(dir)) log(`清理上次残留的缓存: ${dir}`);
+      } catch (_) {}
+    }
+  }
+}
+
+/** 进程号还活着吗。EPERM 说明进程在、只是没权限，也算活着 */
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e && e.code === 'EPERM';
+  }
+}
+
+/**
+ * 分片巡检。ffmpeg 的 delete_segments 在 Windows 上偶尔删不掉
+ * （文件句柄被播放器占着），分片就会越攒越多。这里按播放列表对账，
+ * 把已经不在列表里、且 30 秒没动过的分片补删掉。
+ */
+function pruneSegments() {
+  if (KEEP_CACHE) return;   // 明确要求留档就别动它
+  let names = [];
+  try { names = fs.readdirSync(HLS_DIR); } catch (_) { return; }
+  const keep = new Set();
+  try {
+    const txt = fs.readFileSync(path.join(HLS_DIR, 'live.m3u8'), 'utf8');
+    for (const m of txt.matchAll(/^(seg\d+\.ts)$/gm)) keep.add(m[1]);
+  } catch (_) { return; }   // 播放列表还没生成，下一轮再说
+  const now = Date.now();
+  for (const name of names) {
+    if (!/^seg\d+\.ts$/.test(name) || keep.has(name)) continue;
+    const f = path.join(HLS_DIR, name);
+    try {
+      if (now - fs.statSync(f).mtimeMs < 30000) continue;
+      fs.unlinkSync(f);
+    } catch (_) {}
+  }
+}
 
 function startHlsPackager() {
   if (hlsProc || hlsUnavailable) return;
@@ -949,8 +1062,21 @@ function startHlsPackager() {
     return;
   }
 
-  try { fs.rmSync(HLS_DIR, { recursive: true, force: true }); } catch (_) {}
-  fs.mkdirSync(HLS_DIR, { recursive: true });
+  // --keep-cache 时保留上次的分片，方便排查；默认每次开播前先清空
+  if (!KEEP_CACHE) rmDirQuiet(HLS_DIR);
+  try {
+    fs.mkdirSync(HLS_DIR, { recursive: true });
+    hlsDirOwned = true;
+    // 记下是谁在用这个目录：下次启动发现进程已经没了，就可以放心把残留删掉
+    try {
+      fs.writeFileSync(path.join(HLS_DIR, 'owner.json'),
+        JSON.stringify({ pid: process.pid, port: PORT, startedAt: new Date().toISOString() }));
+    } catch (_) {}
+  } catch (e) {
+    hlsUnavailable = true;
+    log(`创建缓存目录失败: ${e.message}（可用 --cache-dir 换个位置）`);
+    return;
+  }
 
   const ff = detectFfmpeg();
 
@@ -1022,13 +1148,25 @@ function startHlsPackager() {
     ];
   }
   log(`HLS 分片器启动: ${ff}${TRANSCODE ? `（NVENC 重编码 ${FPS}fps CFR）` : '（直接转封装）'}`);
+  log(`  分片写入 ${HLS_DIR}${KEEP_CACHE ? '（--keep-cache，退出不删）' : '（退出时自动清理）'}`);
   // 用相对路径 + cwd，分片全部落在 HLS_DIR 里。
   // 注意：ffmpeg 4.1 的 hls 封装器在 Windows 上会间歇性吐
   //   "Cannot use rename on non file protocol, this may lead to races..."
   // 实测与相对/绝对路径、加不加 file: 前缀、hls_flags 组合都无关
   // （同一条命令跑两次，一次有一次没有），分片仍完整落盘，属纯噪音。
   // 所以不做参数规避，只在下面把它从日志里滤掉，免得用户以为出错了。
-  hlsProc = spawn(ff, args, { cwd: HLS_DIR, stdio: ['ignore', 'ignore', 'pipe'] });
+  try {
+    hlsProc = spawn(ff, args, { cwd: HLS_DIR, stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch (e) {
+    // 杀毒软件拦截、路径失效、管道创建失败等都会在这里抛出来，
+    // 不接住就是未捕获异常，整个中继会跟着挂掉
+    hlsProc = null;
+    hlsUnavailable = true;
+    log(`启动 ffmpeg 失败: ${e.message}`);
+    return;
+  }
+  // 兜底巡检：30 秒对一次账，防止 delete_segments 删不掉时缓存无限长大
+  if (!pruneTimer) { pruneTimer = setInterval(pruneSegments, 30000); pruneTimer.unref(); }
   // 捕获 ffmpeg 的 stderr：正常时不输出，出错时把原因打进日志便于排查
   let errLines = 0;
   hlsProc.stderr.on('data', d => {
@@ -1046,7 +1184,8 @@ function startHlsPackager() {
     hlsProc = null;
     // ffmpeg 偶发退出（上游短暂断流、目录竞争等）不应让播放永久中断，
     // 只要还有人在看就 2 秒后自动重启，连续失败则退避。
-    if (code === 0 || hlsRestartTimer) return;
+    // 已经在退出流程里了就别再拉起来，否则日志里会多一行无意义的「自动重启」。
+    if (shuttingDown || code === 0 || hlsRestartTimer) return;
     hlsRestarts++;
     if (hlsRestarts > 20) {
       log(`HLS 分片器连续退出 ${hlsRestarts} 次，停止自动重启`);
@@ -1087,11 +1226,14 @@ function serveHlsSegment(res, name) {
 const USE_FLV = !!flags.flv;   // --flv: 低延迟模式，直接播 FLV，不重编码
 
 server.listen(PORT, '127.0.0.1', async () => {
-  log(`中继已启动 (v2.8) — ${IS_BILI ? '哔哩哔哩' : '虎牙'}`);
+  log(`中继已启动 (v2.9) — ${IS_BILI ? '哔哩哔哩' : '虎牙'}`);
   log(`  播放器: ${PLAYER || '未找到（可用 --player 指定，或设置 POTPLAYER_PATH）'}`);
   log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
   log(`  HLS 播放地址（推荐，零掉帧）: http://127.0.0.1:${PORT}/live.m3u8`);
   log(`  FLV 播放地址（低延迟备用）: http://127.0.0.1:${PORT}/live.flv`);
+  log(KEEP_CACHE
+    ? `  缓存目录: ${HLS_DIR}（--keep-cache，退出不删）`
+    : `  缓存目录: ${HLS_DIR}（退出/关窗口自动清理）`);
 
   // 缺 ffmpeg 时播放器只会看到一个永远 503 的 m3u8，黑屏且没有解释。
   // 启动阶段就说清楚，别让人干等。
@@ -1153,9 +1295,23 @@ function openPlayer() {
   // 路径失效（换过目录、卸载过播放器）时 spawn 会抛 error，
   // 不接住就是未捕获异常，整个中继会跟着挂掉
   const child = spawn(PLAYER, [url], { detached: true, stdio: 'ignore' });
+  const openedAt = Date.now();
   child.on('error', e => {
     log(`拉起播放器失败: ${e.message}`);
     log(`  可以手动用任意播放器打开: ${url}`);
+  });
+  /**
+   * 播放器关掉就结束中继，连带把缓存清干净。
+   * 现在没有黑窗口可点了，这个是「停止播放」的正常入口 —— 关 PotPlayer 就是停。
+   * 有些 PotPlayer 会把自己交给已经开着的实例然后立刻退出，
+   * 那种情况 15 秒内就退出的不算「用户关掉了播放器」，忽略掉。
+   */
+  child.on('exit', () => {
+    if (Date.now() - openedAt < 15000) {
+      log('播放器进程很快消失（可能是交给了已开的实例），继续运行');
+      return;
+    }
+    shutdown(0, '播放器已关闭，中继退出并清理缓存');
   });
   child.unref();
 }
@@ -1195,14 +1351,50 @@ server.on('error', err => {
     });
 });
 
-// 退出时把 ffmpeg 子进程一起收掉。
-// 控制台被强关、进程被任务管理器结束时，ffmpeg 不一定跟着走，
-// 残留下来的会继续读本地流、往临时目录写分片。
+// ---------------- 退出清理 ----------------
+/**
+ * 收掉分片器。
+ * Windows 上没有进程组信号，hlsProc.kill() 只杀 ffmpeg 自己；
+ * 统一走 taskkill /T /F 更稳（它拉起的子进程也一起走）。
+ * 控制台被强关、任务管理器结束进程时子进程不一定跟着走，
+ * 残留下来的会继续读本地流、往缓存目录写分片 —— 所以启动时还要再扫一遍残留。
+ */
 function killHls() {
-  if (!hlsProc) return;
-  try { hlsProc.kill(); } catch (_) {}
+  const proc = hlsProc;
   hlsProc = null;
+  if (!proc || !proc.pid) return;
+  try {
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    } else {
+      process.kill(proc.pid, 'SIGKILL');
+    }
+  } catch (_) {
+    try { proc.kill(); } catch (_) {}
+  }
 }
-process.on('exit', killHls);
-process.on('SIGTERM', () => { killHls(); process.exit(0); });
-process.on('SIGINT', () => { log('退出'); killHls(); server.close(); process.exit(0); });
+
+let shuttingDown = false;
+/** 统一退出流程：杀 ffmpeg → 删缓存目录 → 退出 */
+function shutdown(code, why) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (why) { try { log(why); } catch (_) {} }
+  killHls();
+  if (pruneTimer) { clearInterval(pruneTimer); pruneTimer = null; }
+  try { server.close(); } catch (_) {}
+  // ffmpeg 刚被杀掉时文件句柄还没释放，稍等一下再删；删不掉也不阻塞退出
+  setTimeout(() => { clearCacheDir(); process.exit(code); }, 300);
+}
+
+// 兜底：不论从哪条路退出（包括别处直接 process.exit），都保证 ffmpeg 和缓存被收掉
+process.on('exit', () => { killHls(); clearCacheDir(); });
+process.on('SIGINT', () => shutdown(0, '退出'));
+process.on('SIGTERM', () => shutdown(0, '退出'));
+process.on('SIGHUP', () => shutdown(0, '退出'));   // 关控制台窗口走这条
+if (process.platform === 'win32') process.on('SIGBREAK', () => shutdown(0, '退出'));
+process.on('uncaughtException', e => shutdown(1, `异常退出: ${e && e.message}`));
+process.on('unhandledRejection', e => shutdown(1, `异常退出: ${e && e.message}`));
+
+// 启动时先清一遍上次没删干净的残留（进程已死的目录直接清，剩下的按时间兜底）
+sweepStaleCache();

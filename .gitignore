@@ -2,6 +2,9 @@
 last-room.txt
 *.log
 
+# 播放缓存（HLS 分片），退出时自动删除，正常不该出现在这里
+.cache/
+
 # B 站登录 Cookie（含 SESSDATA，等同账号凭证，绝对不能提交）
 bili-cookie.txt
 

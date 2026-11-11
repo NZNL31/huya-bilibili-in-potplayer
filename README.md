@@ -46,9 +46,29 @@
   请输入房间: _
 ```
 
-输进去回车 → 问画质 → 问模式 → **一路回车**（默认就是最佳配置）→ PotPlayer 自动打开开始播。
+输进去回车 → 问画质 → 问模式 → **一路回车**（默认就是最佳配置）→ 黑窗口自己关掉，PotPlayer 约 10 秒后弹出开始播。
 
-> 🔴 **播放期间别关那个黑窗口。** 关了就是停止播放。
+> 🟢 **窗口会自己消失，不是崩了。** 配置一问完，中继就转到后台，桌面不留黑窗口。
+> 想停止播放：**直接关掉 PotPlayer**，中继和缓存会跟着收尾。
+> 想让它像以前那样一直开着窗口看日志，就给 bat 加个 `--console` 参数（或看下文的 `relay.log`）。
+
+### 桌面快捷方式
+
+`play-huya&bili.ico` 是项目自带的图标，桌面上已经建好了 **play-huya&bili** 快捷方式，
+双击它和双击 `play-huya&bili.bat` 完全一样，只是带图标更好认。
+
+换电脑或者图标丢了，自己重建一次：
+
+```powershell
+$p = "S:\PotPlayer\play-huya&bili"
+$sh = New-Object -ComObject WScript.Shell
+$s = $sh.CreateShortcut("$env:USERPROFILE\Desktop\play-huya&bili.lnk")
+$s.TargetPath        = "$p\play-huya&bili.bat"
+$s.WorkingDirectory  = $p
+$s.IconLocation      = "$p\play-huya&bili.ico,0"
+$s.Description       = "play-huya&bili — 虎牙 / B 站直播 -> PotPlayer"
+$s.Save()
+```
 
 ---
 
@@ -269,9 +289,17 @@ $env:BILI_COOKIE='你的SESSDATA'; node relay.js "https://live.bilibili.com/6"
 3. ffmpeg 那个 tgz 用 7-Zip 解开两层，把 `ffmpeg.exe` 放进本文件夹
 4. 重新双击 `play-huya&bili.bat`
 
-### 窗口在跑，但 PotPlayer 没弹出来
+### 窗口一闪就没了，PotPlayer 却没弹出来
 
-看黑窗口里有没有这行：
+窗口会自动消失属正常，但正常情况 PotPlayer 10 秒内就该出来。没出来就看日志：
+
+```bat
+notepad relay.log
+```
+
+（或者直接双击 `play-huya&bili.bat --console`，让黑窗口留着，日志实时刷在屏幕上）
+
+日志里如果是：
 
 ```
   播放器: 未找到（可用 --player 指定，或设置 POTPLAYER_PATH）
@@ -281,17 +309,23 @@ $env:BILI_COOKIE='你的SESSDATA'; node relay.js "https://live.bilibili.com/6"
 
 **绿色版、或者装在别的盘**（比如 `D:\PotPlayer`）就搜不到，两种办法任选：
 
-1. **把本文件夹整个挪进 PotPlayer 目录**（像 `D:\PotPlayer\huya`），下次自动认出
+1. **把本文件夹整个挪进 PotPlayer 目录**（就像现在这样 `S:\PotPlayer\play-huya&bili`），下次自动认出
 2. 或者启动时指定路径：
    ```bat
    runtime\node.exe relay.js 825803 --open --player "D:\PotPlayer\PotPlayerMini64.exe"
    ```
 
-都不想弄也行——黑窗口里会打印播放地址，手动在 PotPlayer 里按 `Ctrl+U`「打开 URL」粘进去，一样能播。
+都不想弄也行——`relay.log` 里会打印播放地址，手动在 PotPlayer 里按 `Ctrl+U`「打开 URL」粘进去，一样能播。
 
 ### 提示「端口 8765 被占用」
 
-上次的中继没退干净。程序一般会自动复用；还是不行就手动清掉：
+上次的中继没退干净。程序一般会自动复用（还能顺便把 PotPlayer 重新拉起来）；想彻底停掉重来：
+
+```bat
+clean-cache.bat --stop
+```
+
+它会结束后台中继并清掉缓存。也可以手动来：
 
 ```bat
 netstat -ano | findstr :8765
@@ -299,6 +333,41 @@ taskkill /PID 12345 /F
 ```
 
 （把 `12345` 换成上面查到的最后一列数字）
+
+### 播完会不会在硬盘上留缓存？
+
+**不会。** 播放要用的 HLS 分片放在**本程序目录下的 `.cache\hls-<端口>`**，正常退出时自动删掉：
+
+| 你怎么关的 | 缓存会不会留 |
+|---|---|
+| **关掉 PotPlayer**（现在的标准停止方式） | 删干净 |
+| 中继自己崩了、报错退出 | 删干净 |
+| 播放器还占着 `.ts` 那一刻删不掉 | 下次启动自动清（进程已死的直接清） |
+| 任务管理器结束进程 / 断电 | 下次启动自动清，或者双击 `clean-cache.bat` |
+
+缓存大小是被限制住的：只保留最近 8 秒的分片（8M 档大约 8~15 MB），另外每 30 秒巡检一次，
+把已经不在播放列表里的旧分片补删掉 —— 有些播放器会一直占着文件，ffmpeg 自己删不掉，
+这一层就是防它们越攒越多。
+
+**手动清一下**：
+
+```bat
+clean-cache.bat
+```
+
+会用 Node 扫一遍 `.cache` 和 `%TEMP%` 里旧版本留下的 `huya-hls-*` 目录，顺手结束掉没爹的 ffmpeg，
+最后告诉你好多 MB。想看会清多少而不真删，加参数 `--dry-run`。
+
+> 旧版本（v2.8 及以前）把分片写在 `%TEMP%\huya-hls-<端口>` 里，退出时从来不删，
+> 一场直播几 MB 到几百 MB，攒久了 C 盘就少几个 G —— 这个版本已经改成程序目录下的 `.cache`，
+> 并把旧位置一起纳入了清理范围。
+
+想换位置就加 `--cache-dir`，想留档排查问题就加 `--keep-cache`：
+
+```bat
+runtime\node.exe relay.js 825803 --open --cache-dir S:\_tmp\huya-cache
+runtime\node.exe relay.js 825803 --open --keep-cache
+```
 
 ### 没有声音
 
@@ -383,6 +452,16 @@ node relay.js 825803 --port 8766 --open
 | `--jitter <毫秒>` | `350` | 抖动缓冲深度。网络抖就调大，想压延迟就调小（低于 150 会开始丢帧） |
 | `--player <路径>` | 自动探测 | 指定 PotPlayer 可执行文件 |
 | `--ffmpeg <路径>` | 自动探测 | 指定 ffmpeg 可执行文件 |
+| `--cache-dir <目录>` | 本目录下 `.cache` | 分片（缓存）放哪。默认跟程序同一个盘，退出自动删 |
+| `--keep-cache` | 关 | 退出时保留分片，排查问题用（平时别加） |
+| `--log-file <路径>` | 无 | 日志同时写一份到文件（启动器默认写 `relay.log`） |
+
+启动器（`play-huya&bili.bat`）自己的参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| （无） | — | 问完配置就把中继转到后台、关掉黑窗口 |
+| `--console` | 关 | 让中继占着窗口跑，日志实时滚屏（排查问题用） |
 
 环境变量：`POTPLAYER_PATH`、`FFMPEG_PATH`、`BILI_COOKIE`。
 
@@ -416,6 +495,10 @@ node relay.js bili:21452505 --port 9000
 | `ffmpeg.exe` | ffmpeg 便携版 | 首次运行自动下载 |
 | `last-room.txt` | 记住上次的房间（含平台信息） | 运行时自动生成 |
 | `bili-cookie.txt` | B 站登录 Cookie，可选，用于解锁 1080p | 自己手动创建 |
+| `.cache\hls-<端口>\` | HLS 分片（缓存），播完自动删 | 运行时自动生成 |
+| `relay.log` | 后台运行时的日志，每次启动清空 | 运行时自动生成 |
+| `play-huya&bili.ico` | 桌面快捷方式的图标 | 仓库自带 |
+| `clean-cache.js` / `clean-cache.bat` | 一键清缓存 / 结束后台中继（兜底用） | 仓库自带 |
 
 ---
 

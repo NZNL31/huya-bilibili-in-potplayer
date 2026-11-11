@@ -1,16 +1,26 @@
 #!/usr/bin/env node
 /**
- * 虎牙 / 哔哩哔哩 直播 - PotPlayer 交互式启动器
+ * play-huya&bili —— 虎牙 / 哔哩哔哩直播 -> PotPlayer 交互式启动器
  *
  * 交互逻辑全部放在 Node 里，bat 只负责拉起本文件。
  * 这样可以彻底避开 cmd 的 GBK 编码、CRLF 换行、变量展开等一堆坑。
+ *
+ * 两种运行方式：
+ *   默认        问完房间/画质/模式就把中继丢到后台，本窗口自己关掉（不留黑窗口）
+ *   --console   老行为：本窗口就是中继，关窗口 = 停止播放
  */
 'use strict';
 
 const readline = require('readline');
+const net = require('net');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+
+const PORT = 8765;                 // 必须和 relay.js 的默认端口一致
+const LOG_NAME = 'relay.log';      // 后台运行时的日志，出问题看它
+const HIDE = !process.argv.includes('--console');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /**
  * 行队列式输入。
@@ -111,7 +121,7 @@ const ALWAYS_ON_ROOM = '660000';
 
 async function main() {
   console.log(LINE);
-  console.log('     虎牙 / 哔哩哔哩 直播  -  PotPlayer');
+  console.log('     play-huya&bili   虎牙 / 哔哩哔哩直播 -> PotPlayer');
   console.log(LINE);
   console.log('');
 
@@ -223,46 +233,119 @@ async function main() {
 
   prompt.close();
 
+  const relayArgs = [path.join(__dirname, 'relay.js'), ...args, '--log-file', path.join(__dirname, LOG_NAME)];
+
   console.log('');
   console.log(LINE);
   console.log(`  ${isBili ? 'B站' : '虎牙'}: ${roomArg}   画质: ${
     isBili ? (BILI_QN_NAMES[qn] || ('qn=' + qn)) : (bitrate / 1000 + 'M')
   }   模式: ${m === '2' ? '流畅优先' : m === '3' ? '低延迟' : '原画直通'}`);
-  console.log('  正在启动中继...');
   console.log(LINE);
   console.log('');
-  console.log('  首次启动约需 10 秒缓冲，PotPlayer 会自动打开。');
-  console.log('  关闭本窗口即可停止播放。');
-  console.log('');
 
-  const relay = spawn(process.execPath, [path.join(__dirname, 'relay.js'), ...args], {
-    stdio: 'inherit',
+  if (!HIDE) {
+    // --console：老行为，中继占着这个窗口，日志直接看得见
+    console.log('  控制台模式：关掉本窗口即停止播放。');
+    console.log('  首次启动约需 10 秒缓冲，PotPlayer 会自动打开。');
+    console.log('');
+    const relay = spawn(process.execPath, relayArgs, { stdio: 'inherit', cwd: __dirname });
+    relay.on('error', e => {
+      console.log('');
+      console.log(`  [错误] 无法启动中继: ${e.message}`);
+      process.exitCode = 1;
+    });
+    relay.on('exit', code => {
+      if (code !== 0) {
+        console.log('');
+        console.log(`  [错误] 中继退出，代码 ${code}`);
+        console.log('');
+        console.log('  常见原因：');
+        console.log('    1. 房间不存在，或主播当前未开播');
+        console.log('    2. 端口 8765 被占用（还有旧中继在后台跑）');
+        console.log('    3. 网络异常');
+        if (isBili) {
+          console.log('    4. B 站临时风控（换个房间或过几分钟再试）');
+          console.log('    5. 想看 1080p 原画，需要配置 bili-cookie.txt');
+        }
+        console.log('');
+        process.exitCode = code;
+      }
+    });
+    return;
+  }
+
+  // ---------- 默认：后台运行，本窗口稍后自动关掉 ----------
+  console.log('  正在把这个窗口收起来，PotPlayer 约 10 秒后自动弹出...');
+  const relay = spawn(process.execPath, relayArgs, {
     cwd: __dirname,
+    detached: true,          // 脱离本进程，窗口关了也继续跑
+    stdio: 'ignore',         // 没有控制台可写，日志都进 relay.log
+    windowsHide: true,
   });
-
   relay.on('error', e => {
     console.log('');
     console.log(`  [错误] 无法启动中继: ${e.message}`);
     process.exitCode = 1;
   });
+  relay.unref();
 
-  relay.on('exit', code => {
-    if (code !== 0) {
-      console.log('');
-      console.log(`  [错误] 中继退出，代码 ${code}`);
-      console.log('');
-      console.log('  常见原因：');
-      console.log('    1. 房间不存在，或主播当前未开播');
-      console.log('    2. 端口 8765 被占用（还有旧中继在后台跑）');
-      console.log('    3. 网络异常');
-      if (isBili) {
-        console.log('    4. B 站临时风控（换个房间或过几分钟再试）');
-        console.log('    5. 想看 1080p 原画，需要配置 bili-cookie.txt');
-      }
-      console.log('');
-      process.exitCode = code;
-    }
+  const up = await waitRelay(PORT, 15000);
+  if (!up) {
+    console.log('');
+    console.log('  [错误] 中继 15 秒内没起来，先别关窗口，看看原因：');
+    console.log('');
+    dumpLogTail(12);
+    console.log('');
+    console.log('  常见原因：端口 8765 被别的程序占了、网络不通、房间号不对。');
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(`  ✓ 中继已在后台运行（127.0.0.1:${PORT}）`);
+  console.log(`  日志: ${LOG_NAME}（出问题看它）    缓存: .cache\\hls-${PORT}（退出自动删）`);
+  console.log('');
+  console.log('  停止播放：直接关掉 PotPlayer 即可，中继和缓存会自动收尾。');
+  console.log('  窗口 3 秒后关闭...');
+  await sleep(3000);
+  process.exitCode = 0;
+}
+
+/**
+ * 等中继在端口上应答。
+ * 这里只做 TCP 连通性判断，不去读 /url —— 房间没开播时 /url 可能还是空的，
+ * 那种情况中继其实活得好好的，不该被当成「没起来」。
+ */
+function waitRelay(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise(resolve => {
+    const tick = () => {
+      const sock = net.connect({ host: '127.0.0.1', port });
+      let done = false;
+      const finish = ok => {
+        if (done) return;
+        done = true;
+        try { sock.destroy(); } catch (_) {}
+        if (ok) return resolve(true);
+        if (Date.now() > deadline) return resolve(false);
+        setTimeout(tick, 400);
+      };
+      sock.setTimeout(1200);
+      sock.on('connect', () => finish(true));
+      sock.on('error', () => finish(false));
+      sock.on('timeout', () => finish(false));
+    };
+    tick();
   });
+}
+
+/** 后台模式起不来时，把 relay.log 的最后几行打出来，别让人干瞪眼 */
+function dumpLogTail(lines) {
+  try {
+    const all = fs.readFileSync(path.join(__dirname, LOG_NAME), 'utf8').trimEnd().split(/\r?\n/);
+    for (const line of all.slice(-lines)) console.log('    ' + line);
+  } catch (_) {
+    console.log('    （还没有 relay.log，可能根本没启动起来）');
+  }
 }
 
 main().catch(e => {
