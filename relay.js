@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 虎牙 / 哔哩哔哩直播间 -> 本地连续 FLV/HLS 中继（给 PotPlayer / VLC / mpv 用）
- * v2.9
+ * 版本号唯一来源是 package.json，别在这里另写一个（会漂）
  *
  * 处理链路：
  *   上游 CDN -> 并发拉取 -> 按时间戳去重 -> 抖动缓冲重排
@@ -29,6 +29,11 @@ const { spawn, spawnSync } = require('child_process');
 const os = require('os');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/** 版本号只认 package.json，避免代码里再抄一份、两边漂移 */
+const VERSION = (() => {
+  try { return require('./package.json').version; } catch (_) { return '0.0.0'; }
+})();
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -949,6 +954,7 @@ const server = http.createServer((req, res) => {
       platform: PLATFORM,
       room: ROOM,
       roomId: cachedRoomId,
+      version: VERSION,
       cdn: cachedUrl && cachedUrl.cdn,
       nickname: (cachedUrl && cachedUrl.nickname) || '',
       title: (cachedUrl && cachedUrl.title) || '',
@@ -1270,7 +1276,7 @@ function listen() {
 server.once('listening', onListening);
 
 async function onListening() {
-  log(`中继已启动 (v2.9) — ${IS_BILI ? '哔哩哔哩' : '虎牙'}`);
+  log(`中继已启动 (v${VERSION}) — ${IS_BILI ? '哔哩哔哩' : '虎牙'}`);
   log(`  播放器: ${PLAYER || '未找到（可用 --player 指定，或设置 POTPLAYER_PATH）'}`);
   log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
   log(`  HLS 播放地址（推荐，零掉帧）: http://127.0.0.1:${PORT}/live.m3u8`);

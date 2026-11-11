@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 项目本身只在 Windows 上跑（PotPlayer、taskkill、netstat），
+      # CI 只做跨平台也能做的部分：语法检查 + 版本号来源检查。
+      - name: 语法检查
+        run: |
+          node --check relay.js
+          node --check launcher.js
+          node --check clean-cache.js
+
+      - name: 版本号只从 package.json 取
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = require('./package.json');
+            const src = fs.readFileSync('relay.js', 'utf8');
+            if (!src.includes(\"require('./package.json')\")) {
+              console.error('relay.js 应该从 package.json 读取版本号，别在代码里硬写');
+              process.exit(1);
+            }
+            if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) {
+              console.error('package.json 的 version 不是 x.y.z：' + pkg.version);
+              process.exit(1);
+            }
+            console.log('version', pkg.version);
+          "
