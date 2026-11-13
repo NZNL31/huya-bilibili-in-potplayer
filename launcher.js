@@ -200,15 +200,17 @@ async function main() {
     console.log('        画质选择');
     console.log(LINE);
     console.log('');
-    console.log('  [1] 蓝光8M   1080p60 原画质   推荐');
-    console.log('  [2] 蓝光4M   1080p30          省带宽');
+    console.log('  [1] 蓝光8M   1080p60        推荐（多数房间的最高档）');
+    console.log('  [2] 蓝光4M   1080p30        省带宽');
     console.log('  [3] 超清2M   弱网备用');
+    console.log('  [4] 原画     不转码的源流     房间支持时才是真·最高画质');
     console.log('');
     console.log('  直接回车 = 蓝光8M');
     console.log('');
-    const q = await ask('  请选择 [1-3]: ');
+    const q = await ask('  请选择 [1-4]: ');
     if (q === '2') bitrate = 4000;
     else if (q === '3') bitrate = 2000;
+    else if (q === '4') bitrate = 0;   // 0 = ratio=0，向 CDN 要原画
   }
 
   // ---------- 模式 ----------
@@ -217,9 +219,9 @@ async function main() {
   console.log('        播放模式');
   console.log(LINE);
   console.log('');
-  console.log('  [1] 原画直通   画质 100% 无损    推荐');
-  console.log('  [2] 流畅优先   重编码，绝对不掉帧');
-  console.log('  [3] 低延迟     FLV 直连，延迟低约 3 秒');
+  console.log('  [1] 原画直通   FLV 直连，画质 100% 无损    推荐');
+  console.log('  [2] 流畅优先   重编码 + HLS，绝对不掉帧');
+  console.log('  [3] HLS 转封装 兼容老用法；个别播放器播它只出声音');
   console.log('');
   console.log('  直接回车 = 原画直通');
   console.log('');
@@ -230,7 +232,7 @@ async function main() {
   if (isBili) args.push('--qn', String(qn));
   else args.push('--bitrate', String(bitrate));
   if (m === '2') args.push('--transcode');
-  else if (m === '3') args.push('--flv');
+  else if (m === '3') args.push('--hls');
 
   prompt.close();
 
@@ -239,15 +241,15 @@ async function main() {
   console.log('');
   console.log(LINE);
   console.log(`  ${isBili ? 'B站' : '虎牙'}: ${roomArg}   画质: ${
-    isBili ? (BILI_QN_NAMES[qn] || ('qn=' + qn)) : (bitrate / 1000 + 'M')
-  }   模式: ${m === '2' ? '流畅优先' : m === '3' ? '低延迟' : '原画直通'}`);
+    isBili ? (BILI_QN_NAMES[qn] || ('qn=' + qn)) : (bitrate === 0 ? '原画' : bitrate / 1000 + 'M')
+  }   模式: ${m === '2' ? '流畅优先（重编码 + HLS）' : m === '3' ? 'HLS 转封装' : '原画直通（FLV）'}`);
   console.log(LINE);
   console.log('');
 
   if (!HIDE) {
     // --console：老行为，中继占着这个窗口，日志直接看得见
     console.log('  控制台模式：关掉本窗口即停止播放。');
-    console.log('  首次启动约需 10 秒缓冲，PotPlayer 会自动打开。');
+    console.log('  首次启动约需 5 秒缓冲，PotPlayer 会自动打开。');
     console.log('');
     const relay = spawn(process.execPath, relayArgs, { stdio: 'inherit', cwd: __dirname });
     relay.on('error', e => {
@@ -276,7 +278,7 @@ async function main() {
   }
 
   // ---------- 默认：后台运行，本窗口稍后自动关掉 ----------
-  console.log('  正在把这个窗口收起来，PotPlayer 约 10 秒后自动弹出...');
+  console.log('  正在把这个窗口收起来，PotPlayer 约 5 秒后自动弹出...');
   const relay = spawn(process.execPath, relayArgs, {
     cwd: __dirname,
     detached: true,          // 脱离本进程，窗口关了也继续跑
@@ -322,7 +324,11 @@ async function main() {
   } else {
     console.log('  [提示] 读不到中继的 /status，没法确认在播哪个房间；有问题看 relay.log。');
   }
-  console.log(`  日志: ${LOG_NAME}（出问题看它）    缓存: .cache\\hls-${PORT}（退出自动删）`);
+  // 只有 HLS 模式（重编码 / 转封装）才会往硬盘写分片，FLV 直连不落盘
+  const usesHls = m === '2' || m === '3';
+  console.log(usesHls
+    ? `  日志: ${LOG_NAME}（出问题看它）    缓存: .cache\\hls-${PORT}（退出自动删）`
+    : `  日志: ${LOG_NAME}（出问题看它）    缓存: 不用（FLV 直连，不落盘）`);
   console.log('');
   console.log('  停止播放：直接关掉 PotPlayer 即可，中继和缓存会自动收尾。');
   console.log('  窗口 3 秒后关闭...');

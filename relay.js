@@ -5,7 +5,8 @@
  *
  * 处理链路：
  *   上游 CDN -> 并发拉取 -> 按时间戳去重 -> 抖动缓冲重排
- *            -> 补发 AVC/AAC 配置头 -> 连续 FLV -> ffmpeg 转封装 -> HLS
+ *            -> 补发 AVC/AAC 配置头 -> 连续 FLV（默认，直接给播放器）
+ *            -> 可选：ffmpeg 转封装 -> HLS（--hls / --transcode）
  *
  * 用法:
  *   node relay.js                                   # 默认房间 dank1ng，监听 127.0.0.1:8765
@@ -14,8 +15,10 @@
  *   node relay.js --bitrate 2000 --open             # 虎牙：指定码率档
  *   node relay.js https://live.bilibili.com/6       # B 站房间
  *   node relay.js bili:6 --qn 10000 --open          # B 站：指定画质
+ *   node relay.js 660115 --hls                      # 改用 HLS 交付
  *
- * 播放器里打开:  http://127.0.0.1:8765/live.flv  或  http://127.0.0.1:8765/live.m3u8
+ * 播放器里打开:  http://127.0.0.1:8765/live.flv（默认）
+ *                http://127.0.0.1:8765/live.m3u8（加 --hls 时）
  */
 'use strict';
 
@@ -248,12 +251,22 @@ function ffmpegHasFpsMode() {
 
 const PLAYER = detectPlayer();
 
-// 码率档位：8000=蓝光8M 4000=蓝光4M 2000=超清 1000=高清 500=流畅
-const BITRATE_LADDER = [8000, 4000, 2000, 1000, 500];
+// 码率档位：0=原画（不转码的源流） 8000=蓝光8M 4000=蓝光4M 2000=超清 1000=高清 500=流畅
+// 注意：不是每个房间都推原画，接口里的 rateArray 才是准的；请求了房间没有的档位，
+// CDN 会回落到它能给的最高档（不会报错），所以「0」在只有 8M 的房间里就等于 8M。
+const BITRATE_LADDER = [0, 8000, 4000, 2000, 1000, 500];
 let bitrateIdx = BITRATE_LADDER.indexOf(parseInt(flags.bitrate, 10));
-if (bitrateIdx < 0) bitrateIdx = 0;               // 默认蓝光8M（原画质：1080p60 / High profile）
+if (bitrateIdx < 0) bitrateIdx = 1;               // 默认蓝光8M
 let BITRATE = BITRATE_LADDER[bitrateIdx];
+/**
+ * 决定并发数 / 重编码帧率时用的「名义码率」。
+ * 原画(0) 的真实码率未知，按 8M 估：宁可少开并发，也不要把它当低码率去开 4 条，
+ * 否则 20Mbps 的源流会被多条并发拉满带宽。
+ */
+const BITRATE_HINT = BITRATE || 8000;
 const AUTO_BITRATE = !flags['no-auto-bitrate'];   // 默认开启自动降码率
+/** 档位的中文名，日志和启动器共用一套说法 */
+const BITRATE_NAME = b => (b === 0 ? '原画' : (b / 1000) + 'M');
 
 // 预缓冲：本地回环连接抖动很小，2 秒足够；原来 4 秒会让 ffmpeg 等太久而超时退出
 const PREROLL_MS = 2000;
@@ -681,7 +694,7 @@ const PULL_INTERVAL_MS = 2000;   // 每 2 秒发起一条新连接
 // 并发数按码率自适应：8M 档开 4 条会吃掉 30Mbps+，普通宽带扛不住；
 // 低码率时多开几条能更好地补齐块间空隙。
 function maxPulls() {
-  return BITRATE >= 8000 ? 2 : BITRATE >= 4000 ? 3 : 4;
+  return BITRATE_HINT >= 8000 ? 2 : BITRATE_HINT >= 4000 ? 3 : 4;
 }
 let activePulls = 0;
 let lastFailLogAt = 0;
@@ -704,6 +717,7 @@ function pullOnce() {
     if (released) return;
     released = true;
     activePulls--;
+    if (err) lastPullFailAt = Date.now();   // 自动升档要等「最近没失败」才动
     if (err && /403|401/.test(err.message)) { cachedUrl = null; urlFetchedAt = 0; }
     if (err && !/403|401|HTTP 4|timeout|ECONNRESET|aborted/.test(err.message)) {
       consecutiveFails++;
@@ -732,7 +746,14 @@ function pullOnce() {
     });
 }
 
-/** 自动降码率：连续失败 3 次就降一档，减少卡顿 */
+/**
+ * 自动降码率：连续失败 3 次就降一档，减少卡顿。
+ * 降过之后要能升回去 —— 只降不升的话，一次网络抖动就会把画质永久压到 4M/2M，
+ * 用户会一直觉得「画质怎么变差了」。
+ */
+let lastPullFailAt = 0;              // 最近一次拉流失败的时刻
+const BITRATE_IDX_WANT = bitrateIdx; // 用户要的档位，自动升档不会超过它
+
 function maybeDowngrade() {
   if (!AUTO_BITRATE) return;
   if (IS_BILI) return;   // B 站画质由 qn 决定，降 BITRATE 没意义
@@ -741,9 +762,20 @@ function maybeDowngrade() {
     BITRATE = BITRATE_LADDER[bitrateIdx];
     consecutiveFails = 0;
     cachedUrl = null;   // 强制重新取流，让新码率生效
-    log(`网络不稳定，自动降码率到 ${BITRATE / 1000}M`);
+    log(`网络不稳定，自动降码率到 ${BITRATE_NAME(BITRATE)}`);
   }
 }
+
+// 稳定 3 分钟就往回升一档，直到回到用户要的档位
+setInterval(() => {
+  if (!AUTO_BITRATE || IS_BILI) return;
+  if (bitrateIdx <= BITRATE_IDX_WANT) return;
+  if (Date.now() - lastPullFailAt < 180000) return;
+  bitrateIdx--;
+  BITRATE = BITRATE_LADDER[bitrateIdx];
+  cachedUrl = null;
+  log(`网络已稳定 3 分钟，自动升回 ${BITRATE_NAME(BITRATE)}`);
+}, 60000).unref();
 
 /** 把一帧视频放进抖动缓冲。同一时间戳只留一份（各连接内容逐字节相同） */
 function queueVideo(t) {
@@ -818,7 +850,11 @@ function onPullerTag(item) {
     return;
   }
 
-  // 视频（关键帧 / 非关键帧统一处理）：先进抖动缓冲，由 flushVideo 按序发出
+  // 视频（关键帧 / 非关键帧统一处理）：先进抖动缓冲，由 flushVideo 按序发出。
+  // 先排除既不是音频也不是视频的 tag（虎牙部分房间会夹 onTextData 之类的脚本标签）：
+  // 以前它会掉进视频分支，既占抖动缓冲，又把 lastTs 推到前面，导致紧跟其后的
+  // 真实视频帧被当成「已经发过」丢掉 —— 表现就是画面偶尔一顿、还查不出原因。
+  if (t.type !== 9) return;
   queueVideo(t);
 }
 
@@ -930,7 +966,9 @@ const server = http.createServer((req, res) => {
     return handleClient(res);
   }
   if (u.pathname === '/live.m3u8') {
-    return serveHlsPlaylist(res);
+    // 异步函数：播放器提前断开、写响应失败都不能变成未捕获的 rejection
+    serveHlsPlaylist(res).catch(() => { try { res.destroy(); } catch (_) {} });
+    return;
   }
   if (u.pathname.startsWith('/hls/')) {
     return serveHlsSegment(res, u.pathname.slice('/hls/'.length));
@@ -1006,6 +1044,12 @@ let pruneTimer = null;        // 分片巡检定时器
  * 所以只有真正建过目录的进程才有资格清。
  */
 let hlsDirOwned = false;
+/**
+ * 本次进程是否已经起过分片器。
+ * 分片器中途退出重启时不能再清空目录：那样会把播放器正在读的分片和播放列表一起删掉，
+ * 分片编号还会从 0 重新开始，播放器看到 MEDIA-SEQUENCE 倒退就会卡死在某一秒。
+ */
+let hlsEverStarted = false;
 
 /** 删目录。删不掉（文件还被播放器占着）返回 false，留给下次启动或 clean-cache.js */
 function rmDirQuiet(dir) {
@@ -1100,8 +1144,10 @@ function startHlsPackager() {
     return;
   }
 
-  // --keep-cache 时保留上次的分片，方便排查；默认每次开播前先清空
-  if (!KEEP_CACHE) rmDirQuiet(HLS_DIR);
+  // --keep-cache 时保留上次的分片，方便排查；默认本次进程第一次起分片器前先清空。
+  // 重启（分片器偶发退出后自动拉起）时不清，否则播放器正在读的分片会被删掉。
+  if (!KEEP_CACHE && !hlsEverStarted) rmDirQuiet(HLS_DIR);
+  hlsEverStarted = true;
   try {
     fs.mkdirSync(HLS_DIR, { recursive: true });
     hlsDirOwned = true;
@@ -1128,7 +1174,7 @@ function startHlsPackager() {
   // 仍兼容旧的 --no-transcode 写法。
   const TRANSCODE = flags.transcode ? true : (flags['no-transcode'] ? false : false);
   // 帧率跟随源流：主播推 60fps 就按 60fps 出，不要无故砍半
-  const FPS = parseInt(flags.fps, 10) || (BITRATE >= 8000 ? 60 : 30);
+  const FPS = parseInt(flags.fps, 10) || (BITRATE_HINT >= 8000 ? 60 : 30);
 
   let args;
   if (TRANSCODE) {
@@ -1151,9 +1197,9 @@ function startHlsPackager() {
       // VBR + 目标质量：静态画面自动省码率，动态画面才拉高，整体观感比 CBR 好
       '-rc', 'vbr',
       '-cq', '20',
-      '-b:v', `${BITRATE}k`,
-      '-maxrate', `${Math.round(BITRATE * 1.25)}k`,
-      '-bufsize', `${BITRATE * 2}k`,
+      '-b:v', `${BITRATE_HINT}k`,
+      '-maxrate', `${Math.round(BITRATE_HINT * 1.25)}k`,
+      '-bufsize', `${BITRATE_HINT * 2}k`,
       '-g', String(FPS * 2),
       // 编码器偶尔跟不上时，音频包会在复用器里堆积；
       // 默认队列只有 128 个包，一满 ffmpeg 就直接退出。放宽到 1024 更稳。
@@ -1238,30 +1284,77 @@ function startHlsPackager() {
   });
 }
 
-function serveHlsPlaylist(res) {
+/**
+ * 发播放列表。
+ * ffmpeg 是「原地重写」live.m3u8 的，直接 readFileSync 可能读到写了一半的内容
+ * （末尾半行、最后一条分片还没列出来）。播放器拿到残缺的 m3u8 会解析失败，
+ * 典型表现就是「有声音没画面」或者进度卡在某一秒不动。
+ * 所以这里等到读到一份以换行结尾的完整内容再发，并且带上 content-length，
+ * 让播放器不用靠 chunked 结尾来判断内容有没有读完。
+ */
+async function serveHlsPlaylist(res) {
   startHlsPackager();
   const f = path.join(HLS_DIR, 'live.m3u8');
-  if (!fs.existsSync(f)) { res.writeHead(503); return res.end('HLS 还在准备，请稍候重试'); }
-  const body = fs.readFileSync(f, 'utf8')
-    .replace(/^(seg\d+\.ts)$/gm, '/hls/$1');
+  let body = null;
+  for (let i = 0; i < 8; i++) {
+    let cur = null;
+    try { cur = await fs.promises.readFile(f, 'utf8'); } catch (_) { break; }
+    if (cur.startsWith('#EXTM3U') && cur.endsWith('\n')) { body = cur; break; }
+    await sleep(25);   // 正写到一半，等下一次
+  }
+  if (!body) { res.writeHead(503); return res.end('HLS 还在准备，请稍候重试'); }
+  const out = body.replace(/^(seg\d+\.ts)$/gm, '/hls/$1');
   res.writeHead(200, {
     'content-type': 'application/vnd.apple.mpegurl',
+    'content-length': Buffer.byteLength(out),
     'cache-control': 'no-cache',
     'access-control-allow-origin': '*',
   });
-  res.end(body);
+  res.end(out);
 }
 
 function serveHlsSegment(res, name) {
   if (!/^seg\d+\.ts$/.test(name)) { res.writeHead(400); return res.end('bad'); }
   const f = path.join(HLS_DIR, name);
-  if (!fs.existsSync(f)) { res.writeHead(404); return res.end('gone'); }
-  res.writeHead(200, { 'content-type': 'video/mp2t', 'cache-control': 'no-cache' });
-  fs.createReadStream(f).pipe(res);
+  let st = null;
+  try { st = fs.statSync(f); } catch (_) {}
+  if (!st || !st.isFile()) { res.writeHead(404); return res.end('gone'); }
+  res.writeHead(200, {
+    'content-type': 'video/mp2t',
+    'content-length': st.size,
+    'cache-control': 'no-cache',
+    'access-control-allow-origin': '*',
+  });
+  // 分片可能刚好被 delete_segments 删掉：读流出错时只断这条响应，
+  // 不接住的话 'error' 事件没人监听会把整个中继带崩。
+  const rs = fs.createReadStream(f);
+  rs.on('error', () => { try { res.destroy(); } catch (_) {} });
+  rs.pipe(res);
 }
 
 // ---------------- 启动 ----------------
-const USE_FLV = !!flags.flv;   // --flv: 低延迟模式，直接播 FLV，不重编码
+/**
+ * 交付方式：默认 FLV 直连，HLS 改成可选。
+ *
+ * 实测（同一台机器、同一路虎牙 1080p60）：
+ *   · PotPlayer 打开 live.flv   → 稳定出画面，AVC1 + AAC
+ *   · PotPlayer 打开 live.m3u8  → 有时只有声音没有画面，进度条停在十几秒不动
+ * 排查结论：分片本身没问题（同一批 TS 换个服务器/换条 URL 再播就正常），
+ * 是 PotPlayer 一旦把某条 m3u8 播成了「只有声音」，就把这个坏状态留在已经开着的
+ * 实例上，之后每次打开都复用那个卡死的实例 —— 关掉 PotPlayer 重开才会好。
+ * 触发点通常是「播放器开得太早」：分片器还没吐出分片就开，播放器拿到 503 或
+ * 只有一条分片的列表，直接进坏状态。
+ *
+ * 所以：默认走肯定能播的 FLV（还少一层转封装、不用缓存目录、延迟更低）；
+ * HLS 保留但做了三处加固（等分片就绪再开播放器、URL 带随机参数、列表读完整再发）。
+ *
+ *   node relay.js <房间>              FLV 直连（默认）
+ *   node relay.js <房间> --flv        FLV 直连（老写法，仍然有效）
+ *   node relay.js <房间> --hls        HLS（换播放器、或需要 m3u8 时）
+ *   node relay.js <房间> --transcode  重编码 + HLS（弱网兜底）
+ */
+const USE_HLS = (!!flags.hls || !!flags.transcode) && !flags.flv;
+const USE_FLV = !USE_HLS;
 
 /**
  * 开始监听。端口被占用时会先走 server.on('error') 的接管流程，
@@ -1279,19 +1372,21 @@ async function onListening() {
   log(`中继已启动 (v${VERSION}) — ${IS_BILI ? '哔哩哔哩' : '虎牙'}`);
   log(`  播放器: ${PLAYER || '未找到（可用 --player 指定，或设置 POTPLAYER_PATH）'}`);
   log(`  ffmpeg: ${hasFfmpeg() ? detectFfmpeg() : '未找到（HLS 不可用，只能 FLV）'}`);
-  log(`  HLS 播放地址（推荐，零掉帧）: http://127.0.0.1:${PORT}/live.m3u8`);
-  log(`  FLV 播放地址（低延迟备用）: http://127.0.0.1:${PORT}/live.flv`);
+  log(`  FLV 播放地址${USE_FLV ? '（当前使用，零重编码）' : '（备用）'}: http://127.0.0.1:${PORT}/live.flv`);
+  log(`  HLS 播放地址${USE_FLV ? '（备用；个别播放器播它只出声音）' : '（当前使用）'}: http://127.0.0.1:${PORT}/live.m3u8`);
   log(KEEP_CACHE
     ? `  缓存目录: ${HLS_DIR}（--keep-cache，退出不删）`
-    : `  缓存目录: ${HLS_DIR}（退出/关窗口自动清理）`);
+    : USE_FLV
+      ? '  缓存目录: 不用（FLV 直连，不落盘）'
+      : `  缓存目录: ${HLS_DIR}（退出/关窗口自动清理）`);
 
   // 缺 ffmpeg 时播放器只会看到一个永远 503 的 m3u8，黑屏且没有解释。
-  // 启动阶段就说清楚，别让人干等。
+  // 启动阶段就说清楚，别让人干等。（默认的 FLV 模式不需要 ffmpeg）
   if (!USE_FLV && !hasFfmpeg()) {
     log('');
     log('  ⚠ 没找到 ffmpeg，HLS 模式起不来，播放器会一直黑屏。');
     log('    重新运行 play-huya&bili.bat 会自动补上；');
-    log('    或者改用 FLV 模式：在 bat 里选 [3] 低延迟。');
+    log('    或者去掉 --hls / --transcode，走默认的 FLV 直连。');
     log('');
   }
 
@@ -1304,7 +1399,7 @@ async function onListening() {
   try {
     const info = await getStreamUrl(true);
     log(`房间 ${ROOM} -> 房间号 ${info.realId || cachedRoomId}，节点 [${info.cdn}]，` +
-      (IS_BILI ? `画质 qn=${info.qn}` : `码率档 ${BITRATE / 1000}M`));
+      (IS_BILI ? `画质 qn=${info.qn}` : `码率档 ${BITRATE_NAME(BITRATE)}`));
     if (info.nickname) log(`主播: ${info.nickname}`);
     if (info.title) log(`标题: ${info.title}`);
   } catch (e) {
@@ -1317,18 +1412,58 @@ async function onListening() {
   if (OPEN) {
     if (!USE_FLV) {
       startHlsPackager();
-      setTimeout(openPlayer, 10000);   // 重编码需要更久预热，等 10 秒
+      /**
+       * 以前是固定等 10 秒就开播放器。分片器慢一点（8M 档、首块 CDN 慢）时，
+       * 播放器会拿到 503 或者只有一条分片的 m3u8 —— PotPlayer 遇到这种情况会卡在
+       * 「只有声音没有画面、进度条停住」的状态里，而且它之后每次打开这条 URL 都复用
+       * 那个已经卡死的实例，怎么重启中继都没用，只能把 PotPlayer 完全关掉重开。
+       * 所以这里等播放列表真的有内容了再开，别把坏状态喂给播放器。
+       */
+      waitForHlsReady(30000).then(ok => {
+        if (!ok) log('HLS 分片器 30 秒内还没吐出足够分片，仍然先打开播放器（可能要多等一会儿）');
+        openPlayer();
+      });
     } else {
       setTimeout(openPlayer, 5000);
     }
   }
 }
 
+/** 播放列表里已经有几条分片了？分片器没起来 / 还没写出来时返回 0 */
+function hlsSegmentCount() {
+  try {
+    const txt = fs.readFileSync(path.join(HLS_DIR, 'live.m3u8'), 'utf8');
+    return (txt.match(/^seg\d+\.ts$/gm) || []).length;
+  } catch (_) {
+    return 0;
+  }
+}
+
+/** 等 HLS 真的能播（列表里至少有 3 条分片）再开播放器 */
+async function waitForHlsReady(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (hlsSegmentCount() >= 3) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
+/**
+ * 交给播放器的地址。
+ * HLS 后面挂一个每次启动都不同的参数：PotPlayer 会把「这条 URL 播不好」的坏状态
+ * 记在已经开着的实例上，复用同一个 URL 就会一直只出声音。换一个 URL 等于让它重新来。
+ * 中继只认 pathname，查询串随便带。
+ */
+function playerUrl() {
+  return USE_FLV
+    ? `http://127.0.0.1:${PORT}/live.flv`
+    : `http://127.0.0.1:${PORT}/live.m3u8?s=${Date.now().toString(36)}`;
+}
+
 function openPlayer() {
   if (!PLAYER) {
-    const url = USE_FLV
-      ? `http://127.0.0.1:${PORT}/live.flv`
-      : `http://127.0.0.1:${PORT}/live.m3u8`;
+    const url = playerUrl();
     log('未找到 PotPlayer，无法自动拉起播放器。');
     log('  解决办法（任选其一）：');
     log('    1. 安装 PotPlayer：https://potplayer.daum.net/');
@@ -1337,9 +1472,7 @@ function openPlayer() {
     log(`  或者手动用任意播放器打开：${url}`);
     return;
   }
-  const url = USE_FLV
-    ? `http://127.0.0.1:${PORT}/live.flv`
-    : `http://127.0.0.1:${PORT}/live.m3u8`;
+  const url = playerUrl();
   log(`启动播放器: ${PLAYER}`);
   log(`播放地址: ${url}`);
   // 路径失效（换过目录、卸载过播放器）时 spawn 会抛 error，
